@@ -603,28 +603,28 @@ class Compiler
  # parsed, so the same IntArray can be shared across callers. Callers
  # must treat the result as read-only.
   def parse_id_list(s)
-    if s == ""
-      return []
-    end
     if @parse_id_cache.key?(s)
       return @parse_id_pool[@parse_id_cache[s]]
     end
     result = []
-    bs = s.bytes
-    i = 0
-    n = bs.length
-    num = 0
-    while i < n
-      b = bs[i]
-      if b == 44  # ','
-        result.push(num)
-        num = 0
-      else
-        num = num * 10 + (b - 48)
+    if s != ""
+      bs = s.bytes
+      i = 0
+      n = bs.length
+      num = 0
+      while i < n
+        b = bs[i]
+        if b == 44  # ','
+          result.push(num)
+          num = 0
+        else
+          num = num * 10 + (b - 48)
+        end
+        i = i + 1
       end
-      i = i + 1
+      result.push(num)
     end
-    result.push(num)
+    result = result.freeze
     @parse_id_cache[s] = @parse_id_pool.length
     @parse_id_pool.push(result)
     result
