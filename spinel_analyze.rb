@@ -9620,6 +9620,31 @@ class Compiler
       if libname == ""
         ffi_error(mname, dname, "argument must be a string or symbol literal")
       end
+      valid_libname = 1
+      i = 0
+      while i < libname.length
+        c = libname[i]
+        valid_char = 0
+        if c >= "a" && c <= "z"
+          valid_char = 1
+        end
+        if c >= "A" && c <= "Z"
+          valid_char = 1
+        end
+        if c >= "0" && c <= "9"
+          valid_char = 1
+        end
+        if c == "_" || c == "-"
+          valid_char = 1
+        end
+        if valid_char == 0
+          valid_libname = 0
+        end
+        i = i + 1
+      end
+      if valid_libname == 0
+        ffi_error(mname, dname, "invalid library name '" + libname + "'")
+      end
       if @ffi_module_libs[mi] == ""
         @ffi_module_libs[mi] = libname
       else
