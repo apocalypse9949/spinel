@@ -9634,13 +9634,19 @@ class Compiler
         if c >= "0" && c <= "9"
           valid_char = 1
         end
-        if c == "_" || c == "-"
+        if c == "_" || c == "-" || c == "."
           valid_char = 1
         end
         if valid_char == 0
           valid_libname = 0
         end
         i = i + 1
+      end
+      if libname.length > 255
+        valid_libname = 0
+      end
+      if libname[0] == "-" || libname[0] == "." || libname[0] == "_"
+        valid_libname = 0
       end
       if valid_libname == 0
         ffi_error(mname, dname, "invalid library name '" + libname + "'")
