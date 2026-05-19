@@ -9840,6 +9840,24 @@ class Compiler
       if libname == ""
         ffi_error(mname, dname, "argument must be a string or symbol literal")
       end
+      i = 0
+      while i < libname.length
+        b = libname.bytes[i]
+        valid = false
+        if b >= 97 && b <= 122
+          valid = true
+        elsif b >= 65 && b <= 90
+          valid = true
+        elsif b >= 48 && b <= 57
+          valid = true
+        elsif b == 95 || b == 45
+          valid = true
+        end
+        if !valid
+          ffi_error(mname, dname, "invalid character in library name")
+        end
+        i = i + 1
+      end
       if @ffi_module_libs[mi] == ""
         @ffi_module_libs[mi] = libname
       else
