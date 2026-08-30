@@ -6534,6 +6534,18 @@ static void widen_ivars_from_pushed_params(Compiler *c) {
     else {
       TyKind rt = infer_type(c, recv);
       if (ty_is_object(rt)) mi = comp_method_in_chain(c, ty_object_class(rt), name, NULL);
+      /* `Held.add(@found)` / `W.new(@found)`: a singleton method (or the
+         constructor) shares the ivar's backing storage with its parameter
+         exactly like an instance method does, and was the one caller shape
+         this resolution missed -- the pushed element was stored as the int
+         array's own kind, or dropped (#4213; the same arm #3505 added to
+         the sentinel-marking loop). */
+      else if (nt_kind(nt, recv) == NK_ConstantReadNode) {
+        int rci = comp_class_index(c, nt_str(nt, recv, "name"));
+        if (rci >= 0)
+          mi = sp_streq(name, "new") ? comp_method_in_chain(c, rci, "initialize", NULL)
+                                     : comp_cmethod_in_chain(c, rci, name, NULL);
+      }
     }
     if (mi < 0) continue;
     Scope *m = &c->scopes[mi];
