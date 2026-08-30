@@ -163,11 +163,36 @@ void compute_reachable(Compiler *c) {
   int *queue = malloc((size_t)c->nscopes * sizeof(int));
   int qhead = 0, qtail = 0;
 
+  /* --ext-entry designations join the graph as roots: an entry has no
+     compiled call site, so without this it would be unreachable and DCE'd
+     out of the very library it is the point of (ext-design.md, Layer 1). */
+  if (g_ext_entries && *g_ext_entries) {
+    char list[2048];
+    snprintf(list, sizeof list, "%s", g_ext_entries);
+    for (char *tok = strtok(list, ","); tok; tok = strtok(NULL, ",")) {
+      char *dot = strrchr(tok, '.');
+      if (!dot) {
+        fprintf(stderr, "spinel: --ext-entry `%s`: spell it Module.method "
+                        "(module singleton methods export in v1)\n", tok);
+        exit(1);
+      }
+      *dot = '\0';
+      int ci2 = comp_class_index(c, tok);
+      int mi2 = ci2 >= 0 ? comp_cmethod_in_chain(c, ci2, dot + 1, NULL) : -1;
+      if (mi2 < 0) {
+        fprintf(stderr, "spinel: --ext-entry `%s.%s` does not name a "
+                        "`def self.%s` in module %s\n",
+                tok, dot + 1, dot + 1, tok);
+        exit(1);
+      }
+      c->scopes[mi2].is_ext_entry = 1;
+    }
+  }
   for (int s = 0; s < c->nscopes; s++) {
     Scope *sc = &c->scopes[s];
     sc->reachable = 0;
     int is_root = (s == 0 || !sc->name || sp_streq(sc->name, "initialize") ||
-                   method_name_implicitly_invoked(sc->name));
+                   method_name_implicitly_invoked(sc->name) || sc->is_ext_entry);
     if (is_root) { sc->reachable = 1; queue[qtail++] = s; }
   }
 

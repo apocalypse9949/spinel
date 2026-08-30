@@ -191,6 +191,9 @@ typedef struct {
                        though `ret` collapsed to poly (see LocalVar.poly_ctr) */
   int ret_specialized; /* ret was set by specialization (inherited-cls-new copy);
                           don't overwrite it from the shared body in the fixpoint */
+  int is_ext_entry;    /* designated --ext-entry: emitted non-static, a DCE
+                          root, declared in the emitted extension header (#M1
+                          of docs/internals/ext-design.md) */
   int ret_rbs_seeded;  /* ret pinned from an --rbs advisory seed: the fixpoint
                           must not recompute it from the body */
   int ret_rbs_nilable; /* that seed was RBS's nilable form (`Integer?`), and the

@@ -36,6 +36,9 @@ extern int g_no_root_elision;
 extern int g_require_gate_cli;
 extern int g_inline_hot;
 extern int g_no_write_barrier;
+extern const char *g_ext_init_name;
+extern const char *g_ext_entries;
+extern char *g_ext_header_text;
 #define PATH_SEP '/'
 #define EXE_SUFFIX ""
 
@@ -226,6 +229,8 @@ static void usage(void) {
     "              and writes <out>.symbols.json (perf record -g ready)\n"
     "  --debug     Debug build: step through the .rb in gdb/lldb (#line, -g -O0)\n"
     "  --no-line-map  Suppress #line directives\n"
+    "  --ext-init NAME    Emit a host-callable library: NAME() replaces main\n"
+    "  --ext-entry M.m,.. Export these module methods (with -c; writes a .h contract)\n"
     "  --no-inline-hot  Do not force small leaf methods inline (default: do).\n"
     "                 Forcing is worth a sixth of optcarrot's frame rate and\n"
     "                 costs up to twice the C compile time\n"
@@ -288,6 +293,11 @@ int main(int argc, char **argv) {
        and a faster C compile, at the cost of a call per hot-loop method. */
     else if (sp_streq(a, "--no-inline-hot")) { g_inline_hot = 0; i++; }
     else if (sp_streq(a, "--no-write-barrier")) { g_no_write_barrier = 1; i++; }
+    /* Library emission for host extensions (docs/internals/ext-design.md):
+       --ext-init names the host-callable init function (emitted in place of
+       main), --ext-entry designates the exported methods. */
+    else if (sp_streq(a, "--ext-init") && i + 1 < argc) { g_ext_init_name = argv[i + 1]; i += 2; }
+    else if (sp_streq(a, "--ext-entry") && i + 1 < argc) { g_ext_entries = argv[i + 1]; i += 2; }
     /* Refuse an unresolvable require instead of warning past it. Inside a
        resolved dependency set the universe is known, so a require that
        resolves to nothing is a bug; `spin build` has always compiled this way
@@ -495,6 +505,19 @@ int main(int argc, char **argv) {
 
   if (stdout_mode) { fputs(csrc, stdout); free(csrc); return 0; }
 
+  if ((g_ext_init_name || g_ext_entries) && !c_only) {
+    fprintf(stderr, "spinel: --ext-init/--ext-entry emit a LIBRARY: pass -c "
+                    "(the host's build compiles and links the result)\n");
+    free(csrc);
+    return 1;
+  }
+  if (g_ext_entries && !g_ext_init_name) {
+    fprintf(stderr, "spinel: --ext-entry needs --ext-init (the host must "
+                    "initialize the runtime before calling an entry)\n");
+    free(csrc);
+    return 1;
+  }
+
   /* Decide where the generated C goes. */
   char c_path[4096];
   int c_is_temp = 0;
@@ -508,7 +531,20 @@ int main(int argc, char **argv) {
   }
   if (!write_text_file(c_path, csrc)) { free(csrc); return 1; }
 
-  if (c_only) { fprintf(stderr, "Wrote %s\n", c_path); free(csrc); return 0; }
+  if (c_only) {
+    fprintf(stderr, "Wrote %s\n", c_path);
+    if (g_ext_init_name && g_ext_header_text) {
+      char h_path[4096];
+      snprintf(h_path, sizeof h_path, "%s", c_path);
+      size_t hl = strlen(h_path);
+      if (hl > 2 && sp_streq(h_path + hl - 2, ".c")) h_path[hl - 1] = 'h';
+      else strncat(h_path, ".h", sizeof h_path - hl - 1);
+      if (!write_text_file(h_path, g_ext_header_text)) { free(csrc); return 1; }
+      fprintf(stderr, "Wrote %s\n", h_path);
+    }
+    free(csrc);
+    return 0;
+  }
 
   /* ---------- link: cc <generated C> -> native binary ---------- */
   char lib_dir[4096];
