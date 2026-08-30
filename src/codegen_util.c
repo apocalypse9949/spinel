@@ -71,16 +71,26 @@ int  g_pd_skip = -1;
    re-entered emission takes the ordinary path instead of rebuilding it. */
 int  g_cls_tag_skip = -1;
 /* True if evaluating the subtree at `id` may allocate (and so may trigger
-   a GC): any call, container literal, or string interpolation qualifies. */
+   a GC): any call, container literal, lambda, string, symbol or regexp
+   interpolation, or a read of the last match qualifies -- `$~` builds its
+   MatchData, $` and $' their String; $& and $+ are reads, counted with
+   them. */
 int subtree_may_allocate(const NodeTable *nt, int id) {
   if (id < 0) return 0;
   const char *ty = nt_type(nt, id);
   if (!ty) return 0;
   if (sp_streq(ty, "CallNode") || sp_streq(ty, "ArrayNode") ||
       sp_streq(ty, "HashNode") || sp_streq(ty, "KeywordHashNode") ||
-      sp_streq(ty, "InterpolatedStringNode") || sp_streq(ty, "SuperNode") ||
+      sp_streq(ty, "InterpolatedStringNode") || sp_streq(ty, "InterpolatedSymbolNode") ||
+      sp_streq(ty, "InterpolatedRegularExpressionNode") || sp_streq(ty, "BackReferenceReadNode") ||
+      sp_streq(ty, "LambdaNode") || sp_streq(ty, "SuperNode") ||
       sp_streq(ty, "ForwardingSuperNode") || sp_streq(ty, "YieldNode"))
     return 1;
+  /* Prism reads the match globals as plain globals as often as not. */
+  if (sp_streq(ty, "GlobalVariableReadNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    return nm && (sp_streq(nm, "$~") || sp_streq(nm, "$`") || sp_streq(nm, "$'"));
+  }
   /* A NUL-containing (binary) string literal does not lower to an immortal
      rodata pointer: it allocates a heap string via sp_str_from_bytes (every
      evaluation when unfrozen, or once to fill a call-site cache when frozen).
