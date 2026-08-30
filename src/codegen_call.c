@@ -19753,6 +19753,13 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
             emit_method_cname(c, &c->scopes[kmi], &cb9);
             buf_printf(&cb9, "(");
             Scope *ks9 = &c->scopes[kmi];
+            /* A class method whose body reads the receiving class (a class
+               with descendants, `def self.find; name; end`) is compiled with a
+               leading sp_Class token. Pass the class THIS arm's case selected,
+               not the defining class: every arm makes the same call otherwise,
+               and an inherited body would answer `name` as the wrong class for
+               all but one of them (#4217). */
+            const char *lead9 = emit_cmethod_self_cls_arg(c, kmi, k, &cb9);
             /* Every candidate is a separate C function with its own parameter
                list, so the arm has to fill THAT list -- not repeat the
                caller's. Passing the call's arguments verbatim worked only
@@ -19762,7 +19769,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
                different arities broke on whichever one was longer. */
             int np9 = ks9->nparams;
             for (int a = 0; a < np9; a++) {
-              if (a) buf_puts(&cb9, ", ");
+              buf_puts(&cb9, a ? ", " : lead9);
               LocalVar *pp = scope_local(ks9, ks9->pnames[a]);
               TyKind pt = pp ? pp->type : TY_POLY;
               int slot = arg_slot_for_param(c, ks9, a, na9);
