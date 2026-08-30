@@ -19,6 +19,7 @@
    here so the bigint object can raise without pulling in the whole header. */
 extern __attribute__((noreturn)) void sp_raise_cls(const char *cls, const char *msg);
 extern char *sp_str_alloc_ext(size_t len);   /* string heap; sp_alloc.h cannot be included here */
+extern __attribute__((noreturn)) void sp_oom_die(void);   /* sp_gc.h, same include constraint */
 const char *sp_sprintf(const char *fmt, ...);  /* defined in the generated TU */
 
 #define DIG_SIZE (MPZ_DIG_SIZE)
