@@ -372,6 +372,19 @@ const char *sp_crypto_hmac_sha256_hex(const char *key, const char *msg) {SP_GC_R
     return sp_crypto_hmac_hex_buf;
 }
 
+/* The same MAC as its own bytes rather than as hex. Its own buffer, per
+ * the file header's rule: a caller that hexes one MAC and takes the raw
+ * bytes of another must not have the second clobber the first. */
+static SP_TLS char sp_crypto_hmac_sha256_bin_buf[32];
+
+const char *sp_crypto_hmac_sha256_bin(const char *key, const char *msg) {SP_GC_ROOT_STR(key);SP_GC_ROOT_STR(msg);
+    sp_crypto_hmac_sha256((const uint8_t *)key, sp_str_byte_len(key),
+                          (const uint8_t *)msg, sp_str_byte_len(msg),
+                          (uint8_t *)sp_crypto_hmac_sha256_bin_buf);
+    sp_ffi_bin_len = 32;
+    return sp_crypto_hmac_sha256_bin_buf;
+}
+
 /* HMAC-SHA1 (RFC 2104). SHA-1 is here for the same reason
  * sp_crypto_websocket_accept is: an existing protocol names it, and
  * reproducing that protocol is not a new security design. Rails signs
@@ -464,6 +477,17 @@ const char *sp_crypto_hmac_sha1_hex(const char *key, const char *msg) {SP_GC_ROO
     }
     sp_crypto_hmac_sha1_hex_buf[40] = '\0';
     return sp_crypto_hmac_sha1_hex_buf;
+}
+
+/* HMAC-SHA1 as its own bytes; see the SHA-256 sibling. */
+static SP_TLS char sp_crypto_hmac_sha1_bin_buf[20];
+
+const char *sp_crypto_hmac_sha1_bin(const char *key, const char *msg) {SP_GC_ROOT_STR(key);SP_GC_ROOT_STR(msg);
+    sp_crypto_hmac_sha1((const uint8_t *)key, sp_str_byte_len(key),
+                        (const uint8_t *)msg, sp_str_byte_len(msg),
+                        (uint8_t *)sp_crypto_hmac_sha1_bin_buf);
+    sp_ffi_bin_len = 20;
+    return sp_crypto_hmac_sha1_bin_buf;
 }
 
 /* ---------- Base64URL (RFC 4648 §5) ---------- */

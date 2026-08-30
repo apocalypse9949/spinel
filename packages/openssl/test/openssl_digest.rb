@@ -28,3 +28,20 @@ begin
 rescue OpenSSL::OpenSSLError => e
   puts "#{e.class}: #{e.message}"
 end
+
+# HMAC's raw half. The bytes are the same bytes the hex spelling names, which
+# is the property that matters: hex(digest(...)) == hexdigest(...).
+p OpenSSL::HMAC.digest("SHA256", "key", "msg").bytesize
+p OpenSSL::HMAC.digest("SHA1", "key", "msg").bytesize
+p OpenSSL::HMAC.digest("SHA256", "key", "msg").unpack1("H*") ==
+  OpenSSL::HMAC.hexdigest("SHA256", "key", "msg")
+p OpenSSL::HMAC.digest("SHA1", "key", "msg").unpack1("H*") ==
+  OpenSSL::HMAC.hexdigest("SHA1", "key", "msg")
+# A MAC with an embedded NUL is the case a NUL-terminated return would lose.
+p OpenSSL::HMAC.digest("SHA256", "\x0b" * 20, "Hi There").unpack1("H*")
+
+begin
+  OpenSSL::HMAC.digest("MD5", "k", "m")
+rescue OpenSSL::OpenSSLError => e
+  puts "#{e.class}: #{e.message}"
+end
