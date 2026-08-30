@@ -23,6 +23,8 @@ module OpenSSL
     native_func :sha1_bin,        [:string],          :cbinstr, "sp_crypto_sha1_bin"
     native_func :hmac_sha256_hex, [:string, :string], :cstring, "sp_crypto_hmac_sha256_hex"
     native_func :hmac_sha1_hex,   [:string, :string], :cstring, "sp_crypto_hmac_sha1_hex"
+    native_func :hmac_sha256_bin, [:string, :string], :cbinstr, "sp_crypto_hmac_sha256_bin"
+    native_func :hmac_sha1_bin,   [:string, :string], :cbinstr, "sp_crypto_hmac_sha1_bin"
   end
 
   module Digest
@@ -51,6 +53,26 @@ module OpenSSL
       case algo.to_s.upcase
       when "SHA256" then Crypto.hmac_sha256_hex(key, data)
       when "SHA1"   then Crypto.hmac_sha1_hex(key, data)
+      else raise Digest::DigestError, "unsupported digest algorithm: #{algo}"
+      end
+    end
+
+    # The same MAC as its own bytes. `Digest::SHA256` has had both spellings
+    # since this file was written; HMAC had only the hex one, which is the
+    # half a human or a header reads.
+    #
+    # The raw half is what another primitive reads. HKDF (RFC 5869) is HMAC
+    # over raw bytes twice, and a caller with only hex has to decode between
+    # the two rounds -- a lossless detour with a chance to get the decode
+    # wrong. The same is true of anything comparing a MAC to bytes off a
+    # wire: a webhook signature, a JWT's HS256 half, an AWS SigV4 chain.
+    #
+    # Same algorithm set and the same refusal as `hexdigest`: whatever one
+    # answers, the other answers.
+    def self.digest(algo, key, data)
+      case algo.to_s.upcase
+      when "SHA256" then Crypto.hmac_sha256_bin(key, data)
+      when "SHA1"   then Crypto.hmac_sha1_bin(key, data)
       else raise Digest::DigestError, "unsupported digest algorithm: #{algo}"
       end
     end

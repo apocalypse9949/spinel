@@ -85,6 +85,18 @@ const char *sp_crypto_hmac_sha256_hex(const char *key, const char *msg);
 /* HMAC-SHA256(key, msg) -> 43-char unpadded base64url. */
 const char *sp_crypto_hmac_sha256_b64url(const char *key, const char *msg);
 
+/* HMAC-SHA256(key, msg) / HMAC-SHA1(key, msg) -> the raw digest bytes
+ * (32 and 20). Same buffer contract as sp_crypto_sha256_bin above: the
+ * result is not NUL-terminated, and its length rides sp_ffi_bin_len.
+ *
+ * The hex spellings beside these are the right primitive when a human or
+ * a protocol header reads the answer. These are for when it feeds another
+ * primitive: HKDF (RFC 5869) is HMAC over raw bytes twice, and hex-then-
+ * decode would be a lossless detour with a chance to get the decode
+ * wrong. */
+const char *sp_crypto_hmac_sha256_bin(const char *key, const char *msg);
+const char *sp_crypto_hmac_sha1_bin(const char *key, const char *msg);
+
 /* HMAC-SHA1(key, msg) -> 40-char lowercase hex. Here for the same
  * reason sp_crypto_websocket_accept is -- an existing protocol names
  * SHA-1 and reproducing it is not a new security design. Rails signs

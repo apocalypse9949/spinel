@@ -10,3 +10,9 @@
 ["OpenSSL::Digest::DigestError", "OpenSSL::OpenSSLError", "StandardError"]
 ["OpenSSL::SSL::SSLError", "OpenSSL::OpenSSLError", "StandardError"]
 OpenSSL::Digest::DigestError: unsupported digest algorithm: MD5
+32
+20
+true
+true
+"b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+OpenSSL::Digest::DigestError: unsupported digest algorithm: MD5

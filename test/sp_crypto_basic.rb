@@ -12,10 +12,16 @@
 #   - Random b64url returns the right length for the requested byte
 #     count, and (because it's random) doesn't compare-equal across
 #     calls.
+#   - The binary HMAC spellings against RFC 4231 test case 1 (a
+#     20-byte 0x0b key), hexed here so the vector stays readable, plus
+#     the property that matters: raw and hex are the same MAC, and the
+#     raw one is its full width whatever bytes it happens to contain.
 module Crypto
   ffi_func :sp_crypto_hmac_sha256_hex,      [:str, :str],       :str
   ffi_func :sp_crypto_hmac_sha256_b64url,   [:str, :str],       :str
   ffi_func :sp_crypto_hmac_sha1_hex,        [:str, :str],       :str
+  ffi_func :sp_crypto_hmac_sha256_bin,      [:str, :str],       :binstr
+  ffi_func :sp_crypto_hmac_sha1_bin,        [:str, :str],       :binstr
   ffi_func :sp_crypto_b64url_encode,        [:str],             :str
   ffi_func :sp_crypto_b64url_decode,        [:str],             :str
   ffi_func :sp_crypto_pbkdf2_sha256_b64url, [:str, :str, :int], :str
@@ -55,3 +61,18 @@ r1 = Crypto.sp_crypto_random_b64url(16) + ""
 r2 = Crypto.sp_crypto_random_b64url(16) + ""
 puts r1.length
 puts(r1 == r2 ? "same" : "diff")
+
+# RFC 4231 test case 1: key = 20 bytes of 0x0b, msg = "Hi There". The raw
+# spellings must agree with the hex ones byte for byte -- the point of having
+# both is the representation, never a different MAC.
+bkey = "\x0b" * 20
+puts Crypto.sp_crypto_hmac_sha256_bin(bkey, "Hi There").unpack1("H*")
+puts Crypto.sp_crypto_hmac_sha256_bin(bkey, "Hi There").unpack1("H*") ==
+     Crypto.sp_crypto_hmac_sha256_hex(bkey, "Hi There")
+puts Crypto.sp_crypto_hmac_sha1_bin(key, msg).unpack1("H*") ==
+     Crypto.sp_crypto_hmac_sha1_hex(key, msg)
+# The length rides sp_ffi_bin_len rather than a terminator, so a digest is
+# always its full width -- a MAC is uniform random bytes and roughly one in
+# eight contains a NUL, which a NUL-terminated return would silently truncate.
+puts Crypto.sp_crypto_hmac_sha256_bin(bkey, "Hi There").bytesize
+puts Crypto.sp_crypto_hmac_sha1_bin(bkey, "Hi There").bytesize
