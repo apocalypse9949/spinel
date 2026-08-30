@@ -644,16 +644,18 @@ ext-cruby-test: $(SPINEL) $(SP_RT_LIB)
 	@if ! command -v ruby >/dev/null 2>&1; then echo "ext-cruby-test: skipped (no ruby)"; exit 0; fi; \
 	RH=$$(ruby -e 'puts RbConfig::CONFIG["rubyhdrdir"]' 2>/dev/null); \
 	RA=$$(ruby -e 'puts RbConfig::CONFIG["rubyarchhdrdir"]' 2>/dev/null); \
+	DLEXT=$$(ruby -e 'puts RbConfig::CONFIG["DLEXT"]' 2>/dev/null); \
 	if [ ! -f "$$RH/ruby.h" ]; then echo "ext-cruby-test: skipped (no ruby.h)"; exit 0; fi; \
+	if [ "$$(uname -s)" = Darwin ]; then SOFLAGS="-bundle -Wl,-undefined,dynamic_lookup"; else SOFLAGS="-shared"; fi; \
 	tmp=$$(mktemp -d /tmp/spinel-extrb.XXXXXX); ok=1; \
 	$(SPINEL) test/ext/kernel.rb -c --no-line-map --ext cruby \
 	  --ext-init spx_init_extk \
 	  --ext-entry ExtKernel.triple,ExtKernel.shout,ExtKernel.total,ExtKernel.must_pos \
 	  -o "$$tmp/extk.c" >/dev/null 2>&1 || { echo "ext-cruby-test: FAIL (emission)"; ok=0; }; \
 	if [ $$ok -eq 1 ]; then \
-	  if $(CC) -shared -fPIC -O1 -w -I"$$RH" -I"$$RA" -Ilib -I"$$tmp" \
+	  if $(CC) $$SOFLAGS -fPIC -O1 -w -I"$$RH" -I"$$RA" -Ilib -Ilib/regexp -I"$$tmp" \
 	       "$$tmp/extk_ext.c" "$$tmp/extk.c" $$(ls lib/*.c lib/regexp/*.c | sed 's/^/ /') \
-	       $(LDFLAGS) -lm -o "$$tmp/extk.so" 2>"$$tmp/cc.err"; then \
+	       $(LDFLAGS) -lm -o "$$tmp/extk.$$DLEXT" 2>"$$tmp/cc.err"; then \
 	    ( cd "$$tmp" && cp $(CURDIR)/test/ext/driver.rb . && ruby driver.rb > out 2>&1 ); \
 	    cmp -s "$$tmp/out" test/ext/expected_cruby || { echo "ext-cruby-test: FAIL (driver output mismatch)"; diff -u test/ext/expected_cruby "$$tmp/out" || true; ok=0; }; \
 	  else echo "ext-cruby-test: FAIL (.so did not compile)"; sed -n 1,6p "$$tmp/cc.err"; ok=0; fi; \
