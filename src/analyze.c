@@ -11244,6 +11244,24 @@ static void mark_nullable_int_locals(Compiler *c) {
          the sentinel in it just as a search miss does. */
       if (nullable_int_value(c, v)) { lv->nullable_int = 1; changed = 1; }
     }
+    /* A PARAMETER whose DEFAULT is the nil literal carries the sentinel on
+       every defaulted call even when each explicit call site passes a real
+       number -- the number is what narrowed the slot to sp_int, and the
+       call-site propagation below never sees the default. `of(path,
+       line = nil)` stored SP_INT_NIL boxed as an Integer: truthy, non-nil?,
+       class Integer, while inspect still said nil (#4212). Only the boxing
+       has to know, as everywhere in this family. */
+    for (int si2 = 1; si2 < c->nscopes; si2++) {
+      Scope *sc2 = &c->scopes[si2];
+      if (!sc2->pdefault) continue;
+      for (int pk2 = 0; pk2 < sc2->nparams; pk2++) {
+        int dv2 = sc2->pdefault[pk2];
+        if (dv2 < 0 || nt_kind(nt, dv2) != NK_NilNode) continue;
+        LocalVar *p2 = sc2->pnames[pk2] ? scope_local(sc2, sc2->pnames[pk2]) : NULL;
+        if (!p2 || (p2->type != TY_INT && p2->type != TY_FLOAT) || p2->nullable_int) continue;
+        p2->nullable_int = 1; changed = 1;
+      }
+    }
     /* An int/float ARRAY local holding such a value hands it to every element
        read and to the block parameter of every iteration over it. The array's
        C element type is unchanged: only the boxing has to know (#3505). */
