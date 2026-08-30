@@ -297,3 +297,45 @@ Note what it does and does not save. The objects are the cheap half: hand-
 written C compiles in milliseconds, while whole-program type inference over
 the Ruby is where the time goes. The cache exists so a package is not
 recompiled once per consuming project, not to make a single build fast.
+
+## Extensions: a Ruby kernel compiled into a CRuby native extension
+
+`spin ext` turns a Ruby method into a C extension for stock CRuby: write the
+hot function in Spinel's Ruby subset, keep your application on CRuby.
+
+```
+spin ext new fast_math     # scaffold an extension gem
+cd fast_math               # edit lib/fast_math/kernel.rb
+spin ext build             # emit the C, the shim and the header into ext/
+spin ext test              # every case through BOTH paths, answers must match
+gem build fast_math.gemspec
+```
+
+The kernel is **plain Ruby**: it runs under CRuby unchanged, which makes it
+its own fallback (the generated loader `require`s the extension and falls
+back to the source) and its own test oracle (`spin ext test` runs each case
+through the pure kernel and the compiled one and diffs). The `if __FILE__ ==
+$0` block at the bottom is the manual test driver *and* how the exported
+methods get their types -- it never runs at extension load.
+
+`spin.toml` names what crosses:
+
+```toml
+[ext]
+module = "FastMath"
+entries = ["FastMath.mandelbrot", "FastMath.render"]
+```
+
+Exported methods take and return `Integer`, `Float`, `bool`, `String`, and
+typed arrays of these; values cross **by copy**, so mutating a parameter is
+refused at compile time (return the result instead). A kernel `raise`
+crosses as the same exception class and message. Kernels run **without the
+GVL** -- other Ruby threads keep running -- one call at a time.
+
+The built gem ships the generated C and vendors the runtime sources:
+installing it needs only a C compiler, never Spinel. `rake-compiler` and
+plain `gem install` work as for any hand-written extension.
+
+Layer underneath (any host, not just CRuby): `spinel kernel.rb -c
+--ext-init NAME --ext-entry Mod.m,...` emits a library with a host-callable
+init function and an `.h` contract -- see docs/internals/ext-design.md.

@@ -70,6 +70,9 @@ usage: spin <command> [args]
   clean                remove build/
   flags                print the compiler flags this project implies, for a
                        build driven from outside spin (Makefile, script)
+  ext new <name>       scaffold a CRuby extension gem (Ruby kernel -> .so)
+  ext build            emit the kernel C + shim into ext/ and vendor the runtime
+  ext test             differential: each case through the pure AND compiled path
   list [--json]        resolved dependency set (name, version, source)
   tree [--json]        dependency tree from this package
   publish [--direct]   validate + test, then submit this release to the index
@@ -1683,6 +1686,180 @@ APP_MANIFEST = <<TOML
 #   ansi = { path = "../spinel-ansi" }
 TOML
 
+
+# ---- spin ext: compile a Ruby kernel into a CRuby extension ---------------
+# (docs/internals/ext-design.md M2.) `new` scaffolds a gem whose source is
+# plain Ruby (the fallback and the oracle), `build` emits the kernel, shim
+# and header via `spinel --ext cruby` and vendors the runtime sources flat
+# into ext/, `test` compiles the extension and runs the differential
+# harness -- every case through the pure kernel AND the .so.
+
+def ext_camel(name)
+  out = ""
+  name.split("_").each { |w| out += w.length > 0 ? w[0, 1].upcase + w[1, w.length] : "" }
+  out
+end
+
+# [ext] module + entries from spin.toml; dies with usage when absent.
+def ext_manifest(root)
+  toml = TomlDoc.parse(File.read(File.join(root, "spin.toml")))
+  mod = toml.get("ext", "module")
+  entries = toml.get_array("ext", "entries")
+  spin_die("spin.toml has no [ext] section (module = \"...\", entries = [\"Mod.m\"])") if mod == "" || entries == ""
+  [mod, entries]
+end
+
+# The spinel installation's runtime sources (bin/spinel -> ../lib).
+def ext_runtime_dir
+  File.expand_path(File.join(File.dirname(spinel_bin), "..", "lib"))
+end
+
+def cmd_ext_new(name)
+  spin_die("usage: spin ext new <name>") if name == ""
+  spin_die("#{name}: already exists") if File.exist?(name)
+  mod = ext_camel(name)
+  Dir.mkdir(name)
+  Dir.mkdir(File.join(name, "lib"))
+  Dir.mkdir(File.join(name, "lib", name))
+  Dir.mkdir(File.join(name, "ext"))
+  Dir.mkdir(File.join(name, "ext", name))
+  Dir.mkdir(File.join(name, "test"))
+  File.write(File.join(name, "spin.toml"), <<TOML)
+[package]
+name = "#{name}"
+version = "0.1.0"
+
+[ext]
+module = "#{mod}"
+entries = ["#{mod}.double"]
+TOML
+  File.write(File.join(name, "lib", "#{name}.rb"), <<RB)
+# #{name}: loads the compiled extension, or the same code as plain Ruby.
+begin
+  require "#{name}/#{name}"
+rescue LoadError
+  require "#{name}/kernel"
+end
+RB
+  File.write(File.join(name, "lib", name, "kernel.rb"), <<RB)
+# The kernel: plain Ruby. Runs under CRuby unchanged (the fallback and the
+# test oracle); `spin ext build` compiles it into the extension. The guarded
+# block below is the manual test driver AND the entry methods' call-site
+# type source -- it never runs at extension load.
+module #{mod}
+  def self.double(n)
+    n * 2
+  end
+end
+
+if __FILE__ == $0
+  p #{mod}.double(21)
+end
+RB
+  File.write(File.join(name, "ext", name, "extconf.rb"), <<RB)
+require "mkmf"
+$INCFLAGS << " -I$(srcdir)"
+create_makefile("#{name}/#{name}")
+RB
+  File.write(File.join(name, "test", "differential.rb"), <<RB)
+# Every case runs through the pure-Ruby kernel AND the compiled extension,
+# and the answers must match -- the kernel is its own oracle. Run via
+# `spin ext test`; add cases as [:method, [args...]].
+so_dir = ENV["SPIN_EXT_SO_DIR"].to_s
+raise "run this via `spin ext test`" if so_dir.empty?
+$LOAD_PATH.unshift(so_dir)
+require "#{name}"
+
+pure = Module.new
+src = File.read(File.expand_path("../lib/#{name}/kernel.rb", __dir__))
+pure.module_eval(src.sub(/^if __FILE__.*\z/m, ""))
+PURE = pure::#{mod}
+
+CASES = [
+  [:double, [21]],
+  [:double, [0]],
+  [:double, [-7]],
+]
+
+fails = 0
+CASES.each do |m, args|
+  want = PURE.public_send(m, *args)
+  got = #{mod}.public_send(m, *args)
+  next if want == got
+  fails += 1
+  puts "DIFF \#{m}(\#{args.map(&:inspect).join(", ")}): pure=\#{want.inspect} ext=\#{got.inspect}"
+end
+puts fails.zero? ? "differential: \#{CASES.length}/\#{CASES.length} match" : "differential: \#{fails} case(s) diverge"
+exit(fails.zero? ? 0 : 1)
+RB
+  author = sh_read("git config user.name").strip
+  author = "unknown" if author == ""
+  File.write(File.join(name, "#{name}.gemspec"), <<RB)
+Gem::Specification.new do |s|
+  s.name = "#{name}"
+  s.version = "0.1.0"
+  s.summary = "#{name}: a Ruby kernel compiled to a native extension by Spinel"
+  s.authors = ["#{author}"]
+  s.files = Dir["lib/**/*.rb", "ext/**/*.{c,h,rb}"]
+  s.extensions = ["ext/#{name}/extconf.rb"]
+  s.required_ruby_version = ">= 3.0"
+end
+RB
+  File.write(File.join(name, ".gitignore"), "/build/\n/ext/#{name}/*.o\n/ext/#{name}/Makefile\n")
+  system("git -C #{name} init -q")
+  puts "created #{name}/ (extension gem; edit lib/#{name}/kernel.rb, then `spin ext build`)"
+end
+
+def cmd_ext_build(root)
+  pkg = TomlDoc.parse(File.read(File.join(root, "spin.toml"))).get("package", "name")
+  spin_die("spin.toml has no [package] name") if pkg == ""
+  parts = ext_manifest(root)
+  entries = parts[1].split("\n").join(",")
+  extdir = File.join(root, "ext", pkg)
+  kernel = File.join(root, "lib", pkg, "kernel.rb")
+  spin_die("#{kernel}: not found") unless File.exist?(kernel)
+  Dir.mkdir(extdir) unless File.exist?(extdir)
+  cmd = spinel_bin + " " + kernel + " -c --no-line-map --ext cruby" +
+        " --ext-init spx_init_" + pkg +
+        " --ext-entry " + entries +
+        " -o " + File.join(extdir, pkg + ".c")
+  spin_die("spin ext build: spinel failed") unless run_command(cmd)
+  # vendor the runtime sources flat beside the generated C (basenames are
+  # unique across lib/ and lib/regexp/); the gem then builds with cc alone.
+  rt = ext_runtime_dir
+  n = 0
+  (Dir.glob(File.join(rt, "*.c")) + Dir.glob(File.join(rt, "*.h")) +
+   Dir.glob(File.join(rt, "regexp", "*.c")) + Dir.glob(File.join(rt, "regexp", "*.h"))).each do |f|
+    File.write(File.join(extdir, File.basename(f)), File.read(f))
+    n += 1
+  end
+  puts "built ext/#{pkg}/ (#{pkg}.c, #{pkg}.h, #{pkg}_ext.c + #{n} runtime files)"
+end
+
+def cmd_ext_test(root)
+  pkg = TomlDoc.parse(File.read(File.join(root, "spin.toml"))).get("package", "name")
+  extdir = File.join(root, "ext", pkg)
+  spin_die("run `spin ext build` first") unless File.exist?(File.join(extdir, pkg + "_ext.c"))
+  rh = sh_read("ruby -e 'puts RbConfig::CONFIG[\"rubyhdrdir\"]'").strip
+  ra = sh_read("ruby -e 'puts RbConfig::CONFIG[\"rubyarchhdrdir\"]'").strip
+  dlext = sh_read("ruby -e 'puts RbConfig::CONFIG[\"DLEXT\"]'").strip
+  spin_die("spin ext test: needs the ruby development headers (ruby.h)") if rh == "" || !File.exist?(File.join(rh, "ruby.h"))
+  so_dir = File.join(root, "build", "ext")
+  Dir.mkdir(File.join(root, "build")) unless File.exist?(File.join(root, "build"))
+  Dir.mkdir(so_dir) unless File.exist?(so_dir)
+  soflags = sh_read("uname -s").strip == "Darwin" ? "-bundle -Wl,-undefined,dynamic_lookup" : "-shared"
+  cc = ENV["CC"].to_s == "" ? "cc" : ENV["CC"]
+  cmd = cc + " " + soflags + " -fPIC -O2 -Wno-all" +
+        " -I" + rh + " -I" + ra + " -I" + extdir +
+        " " + Dir.glob(File.join(extdir, "*.c")).join(" ") +
+        " -lm -o " + File.join(so_dir, pkg + "." + dlext)
+  spin_die("spin ext test: extension did not compile") unless run_command(cmd)
+  # require "#{pkg}" finds the .so; the loader in lib/ finds the kernel.
+  ok = system("SPIN_EXT_SO_DIR=" + so_dir + " ruby -I " + File.join(root, "lib") +
+              " " + File.join(root, "test", "differential.rb"))
+  spin_die("spin ext test: differential failed") unless ok
+end
+
 def cmd_new(name, lib)
   spin_die("usage: spin new <name> [--lib]") if name == ""
   spin_die("#{name}: already exists") if File.exist?(name)
@@ -1773,6 +1950,18 @@ when "lock", "fetch", "vendor"
   lock_from_records(prj) if cmd == "lock"
   puts "fetched " + prj.dep_paths.length.to_s + " package(s)" if cmd == "fetch"
   cmd_vendor(prj) if cmd == "vendor"
+when "ext"
+  sub = rest.empty? ? "" : rest[0]
+  if sub == "new"
+    cmd_ext_new(rest.length > 1 ? rest[1] : "")
+  elsif sub == "build" || sub == "test"
+    root = find_root(Dir.pwd)
+    spin_die("no spin.toml found") if root == ""
+    cmd_ext_build(root) if sub == "build"
+    cmd_ext_test(root) if sub == "test"
+  else
+    spin_die("usage: spin ext new <name> | spin ext build | spin ext test")
+  end
 when "flags"
   # The handoff: spin resolves the dependencies and warms the native cache,
   # then hands the compiler flags to whoever is driving the build. An

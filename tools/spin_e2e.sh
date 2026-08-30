@@ -723,4 +723,26 @@ esac
 printf 'puts 42\n' > bin/hintprj.rb
 expect "a good build still runs" "42" "$("$SPIN" run 2>&1 | tail -1)"
 
+# --- spin ext: scaffold, build, differential (skips without ruby.h) -----------
+cd "$WORK"
+if command -v ruby >/dev/null 2>&1 && [ -f "$(ruby -e 'puts RbConfig::CONFIG["rubyhdrdir"]' 2>/dev/null)/ruby.h" ]; then
+  "$SPIN" ext new fastx >/dev/null || fail "ext new"
+  cd fastx
+  expect "ext kernel runs as plain Ruby" "42" "$(ruby lib/fastx/kernel.rb 2>&1 | tail -1)"
+  "$SPIN" ext build >/dev/null 2>&1 || fail "ext build"
+  [ -f ext/fastx/fastx.c ] || fail "ext build: no kernel C"
+  [ -f ext/fastx/fastx.h ] || fail "ext build: no header contract"
+  [ -f ext/fastx/fastx_ext.c ] || fail "ext build: no shim"
+  [ -f ext/fastx/sp_gc.c ] || fail "ext build: runtime not vendored"
+  OUT=$("$SPIN" ext test 2>&1 | tail -1)
+  case "$OUT" in
+    *"3/3 match"*) ;;
+    *) fail "ext test differential: [$OUT]" ;;
+  esac
+  # the loader falls back to the plain kernel when no extension is built
+  expect "ext fallback require" "24" "$(ruby -I lib -e 'require "fastx"; puts Fastx.double(12)' 2>&1 | tail -1)"
+else
+  echo "spin-e2e: ext case skipped (no ruby.h)"
+fi
+
 echo "spin-e2e: ALL GREEN"
