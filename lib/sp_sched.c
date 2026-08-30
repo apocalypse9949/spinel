@@ -1460,6 +1460,23 @@ sp_RbVal sp_Queue_pop(sp_queue *q) {
   return v;
 }
 
+sp_RbVal sp_Queue_pop_nb(sp_queue *q) {
+  /* Queue#pop(true) / #pop(false). Non-blocking: raise ThreadError on an empty
+     queue, return the value otherwise. A closed queue returns nil. */
+  SCHED_LOCK();
+  if (q->len == 0) {
+    if (q->closed) { SCHED_UNLOCK(); return sp_box_nil(); }
+    SCHED_UNLOCK();
+    sp_raise_cls("ThreadError", "queue empty");
+  }
+  sp_RbVal v = q->buf[q->head];
+  q->head = (q->head + 1) % q->cap;
+  q->len--;
+  if (q->max > 0) sp_sched_wake_one(&q->push_waiters);
+  SCHED_UNLOCK();
+  return v;
+}
+
 sp_int  sp_Queue_size(sp_queue *q)   { SCHED_LOCK(); sp_int n = q->len;       SCHED_UNLOCK(); return n; }
 sp_bool sp_Queue_empty(sp_queue *q)  { SCHED_LOCK(); sp_bool e = q->len == 0;  SCHED_UNLOCK(); return e; }
 sp_int  sp_Queue_max(sp_queue *q)    { SCHED_LOCK(); sp_int m = q->max;        SCHED_UNLOCK(); return m; }
