@@ -42,7 +42,7 @@ RBS_SRC      = $(wildcard $(RBS_DIR)/src/*.c) $(wildcard $(RBS_DIR)/src/util/*.c
 RBS_OBJ      = $(patsubst $(RBS_DIR)/src/%.c,build/rbs/%.o,$(RBS_SRC))
 RBS_LIB      = build/librbs.a
 
-.PHONY: all regexp rbs_extract rbs-test rbs-seed-test re-lit-test reject-test ext-test alloc-report-test rubyspec rubyspec-gate spin-check \
+.PHONY: all regexp rbs_extract rbs-test rbs-seed-test re-lit-test reject-test ext-test ext-cruby-test alloc-report-test rubyspec rubyspec-gate spin-check \
         test test-run clean-test-results regen-rbs-expected \
         regen-expected regen-expected-err bench optcarrot gate check gate-legs gate-test gate-bench \
         gate-optcarrot clean install uninstall deps tools
@@ -590,7 +590,7 @@ test:
 # The actual run. rbs-test golden-checks the RBS extractor (cheap, C-only).
 # rbs-seed-test checks the seeds actually reach the analyzer (incl. nested
 # classes, #1417).
-test-run: rbs-test rbs-seed-test re-lit-test reject-test ext-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
+test-run: rbs-test rbs-seed-test re-lit-test reject-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@if [ -t 1 ]; then printf '\n'; fi
 	@pass=$$(grep -l '^PASS' build/test-results/*.ok 2>/dev/null | wc -l); \
@@ -635,6 +635,31 @@ ext-test: $(SPINEL) $(SP_RT_LIB)
 	fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "ext-test: pass"; else exit 1; fi
+
+# ext-cruby-test: Layer 2 (--ext cruby): the generated shim compiles into a
+# real .so and a CRuby driver runs it -- values, boundary TypeError, a kernel
+# raise crossing as ArgumentError, and the toplevel constant visible through
+# the fallback-shaped require. Skips cleanly without ruby dev headers.
+ext-cruby-test: $(SPINEL) $(SP_RT_LIB)
+	@if ! command -v ruby >/dev/null 2>&1; then echo "ext-cruby-test: skipped (no ruby)"; exit 0; fi; \
+	RH=$$(ruby -e 'puts RbConfig::CONFIG["rubyhdrdir"]' 2>/dev/null); \
+	RA=$$(ruby -e 'puts RbConfig::CONFIG["rubyarchhdrdir"]' 2>/dev/null); \
+	if [ ! -f "$$RH/ruby.h" ]; then echo "ext-cruby-test: skipped (no ruby.h)"; exit 0; fi; \
+	tmp=$$(mktemp -d /tmp/spinel-extrb.XXXXXX); ok=1; \
+	$(SPINEL) test/ext/kernel.rb -c --no-line-map --ext cruby \
+	  --ext-init spx_init_extk \
+	  --ext-entry ExtKernel.triple,ExtKernel.shout,ExtKernel.total,ExtKernel.must_pos \
+	  -o "$$tmp/extk.c" >/dev/null 2>&1 || { echo "ext-cruby-test: FAIL (emission)"; ok=0; }; \
+	if [ $$ok -eq 1 ]; then \
+	  if $(CC) -shared -fPIC -O1 -w -I"$$RH" -I"$$RA" -Ilib -I"$$tmp" \
+	       "$$tmp/extk_ext.c" "$$tmp/extk.c" $$(ls lib/*.c lib/regexp/*.c | sed 's/^/ /') \
+	       $(LDFLAGS) -lm -o "$$tmp/extk.so" 2>"$$tmp/cc.err"; then \
+	    ( cd "$$tmp" && cp $(CURDIR)/test/ext/driver.rb . && ruby driver.rb > out 2>&1 ); \
+	    cmp -s "$$tmp/out" test/ext/expected_cruby || { echo "ext-cruby-test: FAIL (driver output mismatch)"; diff -u test/ext/expected_cruby "$$tmp/out" || true; ok=0; }; \
+	  else echo "ext-cruby-test: FAIL (.so did not compile)"; sed -n 1,6p "$$tmp/cc.err"; ok=0; fi; \
+	fi; \
+	rm -rf "$$tmp"; \
+	if [ $$ok -eq 1 ]; then echo "ext-cruby-test: pass"; else exit 1; fi
 
 reject-test: $(SPINEL)
 	@ok=1; tmp=$$(mktemp -d /tmp/spinel-reject.XXXXXX); \

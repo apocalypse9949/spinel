@@ -38,7 +38,10 @@ extern int g_inline_hot;
 extern int g_no_write_barrier;
 extern const char *g_ext_init_name;
 extern const char *g_ext_entries;
+extern const char *g_ext_target;
+extern const char *g_ext_feature;
 extern char *g_ext_header_text;
+extern char *g_ext_shim_text;
 #define PATH_SEP '/'
 #define EXE_SUFFIX ""
 
@@ -231,6 +234,7 @@ static void usage(void) {
     "  --no-line-map  Suppress #line directives\n"
     "  --ext-init NAME    Emit a host-callable library: NAME() replaces main\n"
     "  --ext-entry M.m,.. Export these module methods (with -c; writes a .h contract)\n"
+    "  --ext cruby        Also generate the CRuby extension shim (<out>_ext.c)\n"
     "  --no-inline-hot  Do not force small leaf methods inline (default: do).\n"
     "                 Forcing is worth a sixth of optcarrot's frame rate and\n"
     "                 costs up to twice the C compile time\n"
@@ -298,6 +302,7 @@ int main(int argc, char **argv) {
        main), --ext-entry designates the exported methods. */
     else if (sp_streq(a, "--ext-init") && i + 1 < argc) { g_ext_init_name = argv[i + 1]; i += 2; }
     else if (sp_streq(a, "--ext-entry") && i + 1 < argc) { g_ext_entries = argv[i + 1]; i += 2; }
+    else if (sp_streq(a, "--ext") && i + 1 < argc) { g_ext_target = argv[i + 1]; i += 2; }
     /* Refuse an unresolvable require instead of warning past it. Inside a
        resolved dependency set the universe is known, so a require that
        resolves to nothing is a bug; `spin build` has always compiled this way
@@ -491,6 +496,20 @@ int main(int argc, char **argv) {
   free(text);
   if (!nt) { fprintf(stderr, "spinel: failed to load AST\n"); if (seed_path[0]) remove(seed_path); return 1; }
 
+  /* the CRuby shim's feature name (Init_<feature>, the require name) derives
+     from the output basename; codegen needs it while generating the shim */
+  char ext_feat[256];
+  if (g_ext_target && output) {
+    const char *bs = strrchr(output, '/');
+    bs = bs ? bs + 1 : output;
+    size_t fl = 0;
+    for (const char *p = bs; *p && fl < sizeof ext_feat - 1; p++) {
+      if (*p == '.') break;
+      ext_feat[fl++] = *p;
+    }
+    ext_feat[fl] = 0;
+    if (fl) g_ext_feature = ext_feat;
+  }
   char *csrc = codegen_program(nt);
   nt_free(nt);
   if (seed_path[0]) remove(seed_path);
@@ -514,6 +533,13 @@ int main(int argc, char **argv) {
   if (g_ext_entries && !g_ext_init_name) {
     fprintf(stderr, "spinel: --ext-entry needs --ext-init (the host must "
                     "initialize the runtime before calling an entry)\n");
+    free(csrc);
+    return 1;
+  }
+  if (g_ext_target && !sp_streq(g_ext_target, "cruby")) {
+    fprintf(stderr, "spinel: --ext %s: only `cruby` is generated in v1 "
+                    "(the Layer-1 library serves any other host by hand)\n",
+            g_ext_target);
     free(csrc);
     return 1;
   }
@@ -541,6 +567,14 @@ int main(int argc, char **argv) {
       else strncat(h_path, ".h", sizeof h_path - hl - 1);
       if (!write_text_file(h_path, g_ext_header_text)) { free(csrc); return 1; }
       fprintf(stderr, "Wrote %s\n", h_path);
+      if (g_ext_shim_text) {
+        char s_path[4096];
+        size_t cl = strlen(c_path);
+        snprintf(s_path, sizeof s_path, "%.*s_ext.c",
+                 (int)(cl > 2 && sp_streq(c_path + cl - 2, ".c") ? cl - 2 : cl), c_path);
+        if (!write_text_file(s_path, g_ext_shim_text)) { free(csrc); return 1; }
+        fprintf(stderr, "Wrote %s\n", s_path);
+      }
     }
     free(csrc);
     return 0;
