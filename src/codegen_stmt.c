@@ -6291,6 +6291,145 @@ void emit_sg_activate(Compiler *c, int node, int recv, Buf *b, int indent) {
   buf_printf(b, ")->cls_id = %d;\n", ci);
 }
 
+/* The receiver and the index of a multiple-assignment target that has them
+   (`a[i]`, `o.x`); -1 for a target that is a slot. */
+static void masgn_target_parts(const NodeTable *nt, int t, int *recv, int *key) {
+  const char *ty = nt_type(nt, t);
+  *recv = *key = -1;
+  if (!ty) return;
+  if (sp_streq(ty, "IndexTargetNode")) {
+    *recv = nt_ref(nt, t, "receiver");
+    int args = nt_ref(nt, t, "arguments"), n = 0;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &n) : NULL;
+    if (n >= 1) *key = av[0];
+  }
+  else if (sp_streq(ty, "CallTargetNode")) *recv = nt_ref(nt, t, "receiver");
+}
+/* Whether evaluating a part or a value can allocate, and so collect. A builtin
+   operator over scalars is a CallNode to subtree_may_allocate, but `a[i % n]`
+   builds nothing; what has no effect and answers a scalar is arithmetic. */
+static int masgn_part_allocates(Compiler *c, int id) {
+  if (!subtree_may_allocate(c->nt, id)) return 0;
+  if (subtree_has_side_effect(c, id)) return 1;
+  TyKind t = comp_ntype(c, id);
+  return !(t == TY_INT || t == TY_FLOAT || t == TY_BOOL);
+}
+/* Whether the subtree reads the variable a target of the given kind writes. */
+static int masgn_reads(const NodeTable *nt, int id, const char *rty, const char *name) {
+  if (id < 0) return 0;
+  const char *ty = nt_type(nt, id);
+  if (!ty) return 0;
+  if (sp_streq(ty, rty) && nt_str(nt, id, "name") && sp_streq(nt_str(nt, id, "name"), name)) return 1;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (masgn_reads(nt, nt_ref_at(nt, id, i), rty, name)) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (masgn_reads(nt, ids[j], rty, name)) return 1;
+  }
+  return 0;
+}
+/* Whether the target, or one nested in it, writes a variable the subtree
+   reads. */
+static int masgn_target_writes(const NodeTable *nt, int t, int id) {
+  static const char *const VARS[][2] = {
+    { "LocalVariableTargetNode", "LocalVariableReadNode" },
+    { "InstanceVariableTargetNode", "InstanceVariableReadNode" },
+    { "GlobalVariableTargetNode", "GlobalVariableReadNode" },
+    { "ClassVariableTargetNode", "ClassVariableReadNode" },
+    { "ConstantTargetNode", "ConstantReadNode" } };
+  const char *ty = nt_type(nt, t), *nm = nt_str(nt, t, "name");
+  if (!ty) return 0;
+  if (sp_streq(ty, "MultiTargetNode")) {
+    static const char *const SIDES[] = { "lefts", "rights" };
+    for (size_t s = 0; s < sizeof SIDES / sizeof SIDES[0]; s++) {
+      int n = 0;
+      const int *ts = nt_arr(nt, t, SIDES[s], &n);
+      for (int i = 0; i < n; i++) if (masgn_target_writes(nt, ts[i], id)) return 1;
+    }
+    return 0;
+  }
+  if (!nm) return 0;
+  for (size_t v = 0; v < sizeof VARS / sizeof VARS[0]; v++)
+    if (sp_streq(ty, VARS[v][0])) return masgn_reads(nt, id, VARS[v][1], nm);
+  return 0;
+}
+/* A part that answers the same whenever it runs: a read, a literal, or
+   arithmetic over them -- unless a target assigned before its store writes
+   what it reads (`i, a[i] = 1, 2`). */
+static int masgn_part_plain(Compiler *c, int id, const int *lefts, int before) {
+  if (masgn_part_allocates(c, id) || subtree_has_side_effect(c, id)) return 0;
+  for (int i = 0; i < before; i++) if (masgn_target_writes(c->nt, lefts[i], id)) return 0;
+  return 1;
+}
+/* A literal that is not built -- rodata, which no sweep touches; a Bignum
+   is built. */
+static int masgn_rodata(Compiler *c, int id) {
+  return node_is_pure_literal(c->nt, id) && !subtree_may_allocate(c->nt, id) && comp_ntype(c, id) != TY_BIGINT;
+}
+/* The root push for a temp, after the `;` of the statement that set it, when
+   `emit_gc_root_tmp` has one for the type. */
+static void masgn_root(Compiler *c, TyKind t, int tmp, Buf *b) {
+  Buf rb; memset(&rb, 0, sizeof rb);
+  emit_gc_root_tmp(c, t, tmp, &rb);
+  if (rb.p && rb.p[0]) buf_printf(b, " %s", rb.p);
+  free(rb.p);
+}
+/* Whether the slot value `vi` lands in boxes a by-value struct of type `vt`
+   on the heap: a local or an instance variable of that type holds it as it
+   is; any other slot may box it. */
+static int masgn_slot_boxes(Compiler *c, int id, const int *lefts, int ln, int vi, TyKind vt) {
+  if (vi >= ln) return 1;
+  const char *ty = nt_type(c->nt, lefts[vi]), *nm = nt_str(c->nt, lefts[vi], "name");
+  if (!ty || !nm) return 1;
+  if (sp_streq(ty, "LocalVariableTargetNode")) {
+    LocalVar *lv = scope_local(comp_scope_of(c, id), nm);
+    return !lv || lv->type != vt;
+  }
+  if (sp_streq(ty, "InstanceVariableTargetNode")) {
+    Scope *sc = comp_scope_of(c, id);
+    int cid = sc && sc->class_id >= 0 ? sc->class_id : g_class_body_id;
+    int ix = cid >= 0 ? comp_ivar_index(&c->classes[cid], nm) : -1;
+    return ix < 0 || c->classes[cid].ivar_types[ix] != vt;
+  }
+  return 1;
+}
+/* A part evaluated into a rooted temp in the statement's prelude, as its
+   store takes it: boxed for a poly slot, an Integer for an Array's index, a
+   hash's key as its kind keys. The part is emitted whole first, so what it
+   hoists lands before the declaration. */
+static int masgn_hoist_part(Compiler *c, int node, TyKind t, Buf *hb) {
+  Buf eb; memset(&eb, 0, sizeof eb);
+  if (t == TY_POLY) emit_boxed(c, node, &eb);
+  else if (t == TY_INT) emit_int_expr(c, node, &eb);
+  else emit_expr(c, node, &eb);
+  int tmp = ++g_tmp;
+  emit_indent(hb, g_indent);
+  emit_ctype(c, t, hb);
+  buf_printf(hb, " _t%d = %s;", tmp, eb.p ? eb.p : ""); free(eb.p);
+  masgn_root(c, t, tmp, hb);
+  buf_puts(hb, "\n");
+  return tmp;
+}
+/* The frozen guard a single ivar write makes, on a line of its own, when the
+   class has one; the guard's text ends in the separator an inline caller
+   continues from. Consumes `fb`. */
+static void masgn_guard_line(Buf *fb, Buf *b, int indent) {
+  size_t n = fb->p ? strlen(fb->p) : 0;
+  while (n && fb->p[n - 1] == ' ') n--;
+  if (n) { emit_indent(b, indent); buf_printf(b, "%.*s\n", (int)n, fb->p); }
+  free(fb->p);
+}
+/* `_t<tmp>` when the part was evaluated into that temp before the values, or
+   the part itself. */
+static void masgn_part(Compiler *c, int node, int tmp, Buf *b) {
+  if (tmp >= 0) buf_printf(b, "_t%d", tmp);
+  else emit_expr(c, node, b);
+}
+
 void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   const char *ty = nt_type(nt, id);
@@ -8682,6 +8821,64 @@ else {
         if (!lty || !sp_streq(lty, "LocalVariableTargetNode")) { unsupported(c, id, "multiple assignment"); return; }
       }
     }
+    /* Ruby evaluates each target's receiver and index before any value, left
+       to right -- `a[i], o.x = f, g` reads a, i and o, then f and g -- and
+       assigns last. A receiver or index that is a plain read or literal
+       answers the same whenever it runs and stays at its store; once any is a
+       call, a literal that allocates or a write, every target's receiver and
+       index goes into a temp, so the order is Ruby's, and a key that is a
+       fresh object is held while the values build. The temps go into the
+       statement's prelude, ahead of what a value hoists there -- a literal's
+       build -- and each part is emitted whole before its declaration is
+       written, and the index after the receiver's, so what a part hoists
+       lands before its own declaration and after the part before it. The
+       temps are rooted outright: a part that is a read is held by its
+       variable only until a later part or a value runs user code -- a call,
+       or the `to_s` an interpolation runs, which no predicate here sees -- a
+       literal part may be boxed on the heap by its slot, a Rational under a
+       poly key, and the hoist happens only where some part is a call or a
+       build. */
+    int *ttr = ln > 0 ? alloca(sizeof(int) * (size_t)ln) : NULL;
+    int *ttk = ln > 0 ? alloca(sizeof(int) * (size_t)ln) : NULL;
+    int hoist = 0;
+    for (int i = 0; i < ln; i++) {
+      int r, k;
+      masgn_target_parts(nt, lefts[i], &r, &k);
+      ttr[i] = ttk[i] = -1;
+      if (!masgn_part_plain(c, r, lefts, i) || !masgn_part_plain(c, k, lefts, i)) hoist = 1;
+    }
+    if (hoist) {
+      Buf *hb = g_pre;
+      for (int i = 0; i < ln; i++) {
+        int r, k;
+        masgn_target_parts(nt, lefts[i], &r, &k);
+        if (r < 0) continue;
+        int index = sp_streq(nt_type(nt, lefts[i]), "IndexTargetNode");
+        TyKind rt = comp_ntype(c, r);
+        int poly_r = index && (rt == TY_POLY || rt == TY_UNKNOWN);
+        if (index && (k < 0 || !(poly_r || ty_is_array(rt) || (ty_is_hash(rt) && ty_hash_cname(rt))))) continue;
+        if (!index && !ty_is_object(rt)) continue;
+        ttr[i] = masgn_hoist_part(c, r, poly_r ? TY_POLY : rt, hb);
+        if (index) ttk[i] = masgn_hoist_part(c, k, poly_r || ty_is_array(rt) ? TY_INT : ty_hash_key(rt), hb);
+      }
+    }
+    /* A store that can run user code -- the general hash's key hooks, a
+       receiver typed at run time -- or that allocates -- the rest array, a
+       value that is a by-value struct into a slot that boxes it -- comes
+       after every value is built and after the targets before it have taken
+       theirs, so it can collect what an earlier target dropped. */
+    int store_alloc = rest_var || rest_gvar;
+    for (int i = 0; i < ln && !store_alloc; i++) {
+      int r, k;
+      masgn_target_parts(nt, lefts[i], &r, &k);
+      if (k < 0) continue;
+      TyKind rt = comp_ntype(c, r);
+      store_alloc = rt == TY_POLY || rt == TY_UNKNOWN || rt == TY_POLY_POLY_HASH;
+    }
+    for (int i = 0; i < en && !store_alloc; i++) {
+      TyKind vt = comp_ntype(c, els[i]);
+      store_alloc = (ty_is_struct_valued(vt) || comp_ty_value_obj(c, vt)) && masgn_slot_boxes(c, id, lefts, ln, i, vt);
+    }
     /* evaluate all RHS values into temps first (so `a, b = b, a` swaps).
        Save each temp index separately: emit_expr may consume extra g_tmp
        slots via preludes (e.g. array literals), so base+i is unreliable. */
@@ -8763,8 +8960,15 @@ else {
         Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, els[i], &vb);
         buf_puts(b, vb.p ? vb.p : ""); free(vb.p);
       }
-      buf_puts(b, ";\n");
+      buf_puts(b, ";");
       if (tmpts) tmpts[i] = nilish ? TY_POLY : elt;
+      /* Nothing holds the temp until its target takes it, and whatever can
+         allocate after it can run user code that drops its other holder, so
+         it is rooted while a later value or a store can collect. */
+      int later_alloc = store_alloc;
+      for (int j = i + 1; j < en && !later_alloc; j++) later_alloc = masgn_part_allocates(c, els[j]);
+      if (!nilish && !masgn_rodata(c, els[i]) && later_alloc) masgn_root(c, elt, tmps[i], b);
+      buf_puts(b, "\n");
     }
     /* assign lefts */
     for (int i = 0; i < ln; i++) {
@@ -8845,6 +9049,11 @@ else {
           int iv_idx = comp_ivar_index(&c->classes[iv_cid], ivnm);
           if (iv_idx >= 0) ivt = c->classes[iv_cid].ivar_types[iv_idx];
         }
+        if (!(iv_sc && iv_sc->is_cmethod) && iv_cid >= 0) {
+          Buf fb; memset(&fb, 0, sizeof fb);
+          emit_frozen_obj_guard(c, iv_cid, g_self ? g_self : "self", &fb);
+          masgn_guard_line(&fb, b, indent);
+        }
         emit_indent(b, indent);
         if (iv_sc && iv_sc->is_cmethod && iv_cid >= 0)
           buf_printf(b, "civ_%s_%s = ", c->classes[iv_cid].name, ivnm + 1);
@@ -8878,8 +9087,15 @@ else {
         int defc2 = -1; comp_writer_in_chain(c, rc2, base2, &defc2);
         int iv2 = comp_ivar_index(&c->classes[defc2 < 0 ? rc2 : defc2], ivn2);
         TyKind ivt2 = iv2 >= 0 ? c->classes[defc2 < 0 ? rc2 : defc2].ivar_types[iv2] : TY_UNKNOWN;
-        emit_indent(b, indent);
-        buf_puts(b, "("); emit_expr(c, recv_id2, b); buf_printf(b, ")->iv_%s = ", iv_c(base2));
+        {
+          Buf rb; memset(&rb, 0, sizeof rb);
+          masgn_part(c, recv_id2, ttr[i], &rb);
+          Buf fb; memset(&fb, 0, sizeof fb);
+          emit_frozen_obj_guard(c, rc2, rb.p ? rb.p : "", &fb);
+          masgn_guard_line(&fb, b, indent);
+          emit_indent(b, indent);
+          buf_printf(b, "(%s)->iv_%s = ", rb.p ? rb.p : "", iv_c(base2)); free(rb.p);
+        }
         TyKind valt2 = comp_ntype(c, els[i]);
         if (ivt2 == TY_POLY && valt2 != TY_POLY) {
           char expr2[32]; snprintf(expr2, sizeof expr2, "_t%d", tmps[i]);
@@ -8930,13 +9146,16 @@ else {
         TyKind recv_t = comp_ntype(c, recv_id);
         emit_indent(b, indent);
         if (ty_is_array(recv_t)) {
+          /* a Range index stores a slice, which this arm has no call for */
+          if (comp_ntype(c, idx_argv[0]) == TY_RANGE) { unsupported(c, id, "multiple assignment array range index target"); continue; }
           const char *k = (recv_t == TY_POLY_ARRAY) ? "Poly" : array_kind(recv_t);
           if (!k) k = "Int";
           buf_printf(b, "sp_%sArray_set(", k);
-          emit_expr(c, recv_id, b); buf_puts(b, ", ");
+          masgn_part(c, recv_id, ttr[i], b); buf_puts(b, ", ");
           /* the index slot is an sp_int; a POLY index (a widened local, #4204)
              unboxes here, as the boxed-receiver branch below always has */
-          emit_int_expr(c, idx_argv[0], b); buf_puts(b, ", ");
+          if (ttk[i] >= 0) buf_printf(b, "_t%d", ttk[i]); else emit_int_expr(c, idx_argv[0], b);
+          buf_puts(b, ", ");
           if (recv_t == TY_POLY_ARRAY) {
             TyKind valt = tmpts ? tmpts[i] : comp_ntype(c, els[i]);
             char tmp_expr[32]; snprintf(tmp_expr, sizeof tmp_expr, "_t%d", tmps[i]);
@@ -8951,25 +9170,36 @@ else {
           /* A container the fixpoint could not type -- an attr read whose name
              several classes own, so the receiver's class is only known at run
              time -- sets through the boxed index path (#3781). */
-          int tmw = ++g_tmp;
-          buf_printf(b, "{ sp_RbVal _t%d = ", tmw);
-          emit_boxed(c, recv_id, b);
-          buf_puts(b, "; sp_poly_arr_set(_t");
-          buf_printf(b, "%d, ", tmw);
-          emit_int_expr(c, idx_argv[0], b); buf_puts(b, ", ");
+          if (ttr[i] >= 0) buf_printf(b, "sp_poly_arr_set(_t%d, _t%d, ", ttr[i], ttk[i]);
+          else {
+            int tmw = ++g_tmp;
+            buf_printf(b, "{ sp_RbVal _t%d = ", tmw);
+            emit_boxed(c, recv_id, b);
+            buf_puts(b, "; sp_poly_arr_set(_t");
+            buf_printf(b, "%d, ", tmw);
+            emit_int_expr(c, idx_argv[0], b); buf_puts(b, ", ");
+          }
           { TyKind valt = tmpts ? tmpts[i] : comp_ntype(c, els[i]);
             char tmp_expr[32]; snprintf(tmp_expr, sizeof tmp_expr, "_t%d", tmps[i]);
             Buf bxi; memset(&bxi, 0, sizeof bxi);
             emit_boxed_text(c, valt, tmp_expr, &bxi);
             buf_puts(b, bxi.p ? bxi.p : "sp_box_nil()"); free(bxi.p); }
-          buf_puts(b, "); }\n");
+          buf_puts(b, ttr[i] >= 0 ? ");\n" : "); }\n");
         }
         else if (ty_is_hash(recv_t)) {
           const char *hn = ty_hash_cname(recv_t);
           if (!hn) { unsupported(c, id, "multiple assignment hash index target unknown kind"); continue; }
+          /* The sets do not check for a frozen hash; a single store checks
+             before its set, and so does this store, after the values, where
+             CRuby's assignment raises. */
+          buf_puts(b, "if (sp_gc_is_frozen("); masgn_part(c, recv_id, ttr[i], b);
+          buf_puts(b, ")) sp_raise_frozen_hash_at("); masgn_part(c, recv_id, ttr[i], b);
+          buf_printf(b, ", %s);\n", hash_box_cls(recv_t));
+          emit_indent(b, indent);
           buf_printf(b, "sp_%sHash_set(", hn);
-          emit_expr(c, recv_id, b); buf_puts(b, ", ");
-          if (ty_hash_key(recv_t) == TY_INT) emit_int_expr(c, idx_argv[0], b);
+          masgn_part(c, recv_id, ttr[i], b); buf_puts(b, ", ");
+          if (ttk[i] >= 0) buf_printf(b, "_t%d", ttk[i]);
+          else if (ty_hash_key(recv_t) == TY_INT) emit_int_expr(c, idx_argv[0], b);
           else if (ty_hash_key(recv_t) == TY_POLY) emit_boxed(c, idx_argv[0], b);
           else emit_expr(c, idx_argv[0], b);
           buf_puts(b, ", ");
