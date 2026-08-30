@@ -615,7 +615,19 @@ static int obj_class_unrelated(Compiler *c, int a, int b) {
    reopened Integer/Float/String/Symbol/nil method still dispatches), else to a
    sentinel matching no case -- this keeps a plain scalar (cls_id 0) from
    aliasing a regular user class that happens to occupy index 0. */
-static void emit_poly_dispatch_key(Compiler *c, int tv, int cls0_cand, Buf *b) {
+/* A builtin-primitive reopen (`class String; def shout; ...`): its instances
+   exist without any user constructor, so the `.new` census behind
+   `instantiated` never marks it and its dispatch arm must not be dropped for
+   that (#4219). Limited to the primitive names the dispatch key below can map
+   a runtime tag to. */
+static int class_is_prim_reopen(Compiler *c, int k) {
+  const char *n = c->classes[k].name;
+  return sp_streq(n, "Integer") || sp_streq(n, "Float") ||
+         sp_streq(n, "String") || sp_streq(n, "Symbol") ||
+         sp_streq(n, "NilClass");
+}
+
+static void emit_poly_dispatch_key(Compiler *c, int tv, int cls0_cand, int prim_cand, Buf *b) {
   /* Every boxed scalar (int/float/str/sym/nil/bool) carries cls_id 0, which
      aliases the first user class (index 0). When class 0 is a candidate of this
      dispatch -- it defines/inherits the method, so it emits a `case 0:` arm --
@@ -626,7 +638,12 @@ static void emit_poly_dispatch_key(Compiler *c, int tv, int cls0_cand, Buf *b) {
      not a candidate (no `case 0:` arm), a scalar's cls_id 0 already matches
      nothing, so the plain key is correct -- and cheaper on the hot per-dispatch
      path (optcarrot's per-frame tick), so keep it there. */
-  if (!g_promote_mode) {
+  /* With a primitive-reopen candidate in the switch, a scalar receiver has a
+     real arm: its tag has to map to that class's index (a boxed scalar's
+     cls_id carries nothing). Same mapping promote mode always uses; kept off
+     the plain path otherwise, which the hot per-dispatch sites stay on
+     (#4219). */
+  if (!g_promote_mode && !prim_cand) {
     if (cls0_cand) buf_printf(b, "(_t%d.tag == SP_TAG_OBJ ? _t%d.cls_id : 0x7fffffff)", tv, tv);
     else buf_printf(b, "_t%d.cls_id", tv);
     return;
@@ -4780,18 +4797,29 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       int cls0_mi = c->nclasses > 0 ? comp_method_in_chain(c, 0, name, &cls0_d) : -1;
       int cls0_cand = ((cls0_mi >= 0 && c->scopes[cls0_mi].nrequired == 0) ||
                        (c->nclasses > 0 && comp_reader_in_chain(c, 0, name, &cls0_rd))) &&
-                      c->nclasses > 0 && c->classes[0].instantiated;
+                      c->nclasses > 0 &&
+                      (c->classes[0].instantiated || class_is_prim_reopen(c, 0));
       /* a class-valued receiver dispatches class-side, ahead of the instance
          arms (#4218) */
       emit_poly_cls_value_prearm(c, name, 0, NULL, NULL, tv, tr, ret, b);
+      /* a primitive-reopen candidate needs the tag-mapping key (#4219) */
+      int prim_cand0 = 0;
+      for (int k = 0; k < c->nclasses && !prim_cand0; k++) {
+        if (!class_is_prim_reopen(c, k)) continue;
+        int pmi = comp_method_in_chain(c, k, name, NULL);
+        if (pmi >= 0 && c->scopes[pmi].nrequired == 0 &&
+            (scope_has_callable_symbol(c, pmi) || scope_needs_proc_form(c, pmi)))
+          prim_cand0 = 1;
+      }
       buf_puts(b, "switch (");
-      emit_poly_dispatch_key(c, tv, cls0_cand, b);
+      emit_poly_dispatch_key(c, tv, cls0_cand, prim_cand0, b);
       buf_puts(b, ") {");
       for (int k = 0; k < c->nclasses; k++) {
         /* A never-instantiated class can't be this poly value's runtime class,
            so drop its arm (method or reader); the referenced symbol then DCEs
-           as an unreferenced static (#1608). */
-        if (!c->classes[k].instantiated) continue;
+           as an unreferenced static (#1608). A primitive reopen's instances
+           exist without any constructor, so it keeps its arm (#4219). */
+        if (!c->classes[k].instantiated && !class_is_prim_reopen(c, k)) continue;
         /* native (C-backed) class arm: dispatch a declared no-arg method to its
            C symbol on the cast receiver, coercing the result into the slot. */
         if (c->classes[k].is_native_class) {
@@ -5597,7 +5625,8 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
           }
         } }
       int cls0_mi2 = c->nclasses > 0 ? comp_method_in_chain(c, 0, name, NULL) : -1;
-      int cls0_cand2 = cls0_mi2 >= 0 && c->classes[0].instantiated;
+      int cls0_cand2 = cls0_mi2 >= 0 &&
+                       (c->classes[0].instantiated || class_is_prim_reopen(c, 0));
       if (cls0_cand2) {
         /* the same widened arity as the candidate count: a keyword hash
            funds the declared keyword params it names (#4205) */
@@ -5610,8 +5639,17 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
          name against a specific candidate, which this pre-arm does not do. */
       if (kwh < 0)
         emit_poly_cls_value_prearm(c, name, argc, atmp, atmp_ty, tv, tr, ret, b);
+      /* a primitive-reopen candidate needs the tag-mapping key (#4219) */
+      int prim_cand2 = 0;
+      for (int k = 0; k < c->nclasses && !prim_cand2; k++) {
+        if (!class_is_prim_reopen(c, k)) continue;
+        int pmi = comp_method_in_chain(c, k, name, NULL);
+        if (pmi >= 0 && pos_argc >= c->scopes[pmi].nrequired &&
+            (scope_has_callable_symbol(c, pmi) || scope_needs_proc_form(c, pmi)))
+          prim_cand2 = 1;
+      }
       buf_puts(b, "switch (");
-      emit_poly_dispatch_key(c, tv, cls0_cand2, b);
+      emit_poly_dispatch_key(c, tv, cls0_cand2, prim_cand2, b);
       buf_puts(b, ") {");
       for (int k = 0; k < c->nclasses; k++) {
         int defcls = -1;
@@ -5626,8 +5664,10 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
            Struct, no Marshal escape) cannot be this poly value's receiver, so
            its arm is dead. Dropping it makes sp_<Class>_<name> an unreferenced
            static the C compiler then DCEs -- spinel supplies the accurate
-           reference graph, the C compiler removes the code (#1608). */
-        if (!c->classes[k].instantiated) continue;
+           reference graph, the C compiler removes the code (#1608). A
+           primitive reopen's instances exist without any constructor, so it
+           keeps its arm (#4219). */
+        if (!c->classes[k].instantiated && !class_is_prim_reopen(c, k)) continue;
         /* Skip a method with no standalone definition (DCE-pruned, or inlined
            at call sites because it yields): a `case` arm calling its absent
            `sp_Class_method` symbol would dangle at link. The class can't be
@@ -5720,7 +5760,21 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         /* Sized for the longest class name a bundle produces: at 64 the cast
            was silently truncated to `..._t2.v` and the build stopped. */
         char selfpbuf2[320];  /* stack-local: nested inlines each need their own receiver buffer */
-        snprintf(selfpbuf2, sizeof selfpbuf2, "(sp_%s *)_t%d.v.p", c->classes[defcls].c_name, tv);
+        /* A reopened primitive's method takes the unboxed value, not a struct
+           pointer -- read the matching union field instead of casting .v.p to
+           a non-existent sp_<Prim> struct (#4219), as the zero-arg dispatch's
+           arm already does. */
+        { const char *_dcn2 = c->classes[defcls].c_name;
+          if (sp_streq(_dcn2, "Integer") || sp_streq(_dcn2, "Numeric"))
+            snprintf(selfpbuf2, sizeof selfpbuf2, "_t%d.v.i", tv);
+          else if (sp_streq(_dcn2, "Float"))
+            snprintf(selfpbuf2, sizeof selfpbuf2, "_t%d.v.f", tv);
+          else if (sp_streq(_dcn2, "String"))
+            snprintf(selfpbuf2, sizeof selfpbuf2, "_t%d.v.s", tv);
+          else if (sp_streq(_dcn2, "Symbol"))
+            snprintf(selfpbuf2, sizeof selfpbuf2, "(sp_sym)_t%d.v.i", tv);
+          else
+            snprintf(selfpbuf2, sizeof selfpbuf2, "(sp_%s *)_t%d.v.p", _dcn2, tv); }
         /* The ARGUMENT differs from the inline receiver: a by-value class
            takes self BY VALUE, so the boxed pointer is dereferenced for the
            call while g_self keeps the pointer form its ivar reads want. The
