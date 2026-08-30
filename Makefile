@@ -72,7 +72,45 @@ SPINEL = bin/spinel
 # the header: a system with headers but no libssl, or one too old for
 # TLS_client_method, would otherwise pass the header check and fail at the
 # package's own link.
-OPENSSL_AVAILABLE := $(shell printf '\043include <openssl/ssl.h>\nint main(void){return TLS_client_method()!=0;}\n' > /tmp/sp_ossl_probe.c 2>/dev/null && $(CC) /tmp/sp_ossl_probe.c -lssl -lcrypto -o /tmp/sp_ossl_probe >/dev/null 2>&1 && echo yes)
+#
+# KEG-ONLY INSTALLS. On a Homebrew host the headers and libraries are real
+# but off the default search path, so a bare $(CC) fails this probe and the
+# whole package -- sp_openssl.o, `require "openssl"`, and every
+# packages/openssl/test/*.rb -- drops out of the build without saying so.
+# A green `make test` there has not exercised the package at all, which is
+# how an .expected file for it can be written from a run that never
+# happened.
+#
+# So: probe bare first, and only if that fails ask for a prefix and probe
+# AGAIN with -I/-L. A prefix is trusted only when it passes the same
+# compile-and-link probe, so a stale or partial install cannot flip this to
+# yes and then fail at the package's own link. On a host where the bare
+# probe already passes, nothing below runs and the build is unchanged.
+SP_OSSL_PROBE = $(shell printf '\043include <openssl/ssl.h>\nint main(void){return TLS_client_method()!=0;}\n' > /tmp/sp_ossl_probe.c 2>/dev/null && $(CC) $(1) /tmp/sp_ossl_probe.c -lssl -lcrypto -o /tmp/sp_ossl_probe >/dev/null 2>&1 && echo yes)
+OPENSSL_AVAILABLE := $(call SP_OSSL_PROBE,)
+ifneq ($(OPENSSL_AVAILABLE),yes)
+# `brew --prefix` first: it knows a non-default HOMEBREW_PREFIX, which the
+# hardcoded pair below does not. The pair is the fallback for a host with
+# the install but without brew on PATH (a CI image that untars it, say).
+OPENSSL_PREFIX := $(firstword $(wildcard \
+    $(shell brew --prefix openssl@3 2>/dev/null) \
+    $(shell brew --prefix openssl 2>/dev/null) \
+    /opt/homebrew/opt/openssl@3 /usr/local/opt/openssl@3))
+ifneq ($(OPENSSL_PREFIX),)
+OPENSSL_CPPFLAGS := -I$(OPENSSL_PREFIX)/include
+OPENSSL_LDFLAGS  := -L$(OPENSSL_PREFIX)/lib
+OPENSSL_AVAILABLE := $(call SP_OSSL_PROBE,$(OPENSSL_CPPFLAGS) $(OPENSSL_LDFLAGS))
+ifeq ($(OPENSSL_AVAILABLE),yes)
+# The compiler shells out to cc for a program's final link, and the -lssl
+# that openssl.rb's ffi_lib puts on that line needs the -L too. Exported
+# rather than threaded through each recipe because the link happens inside
+# `bin/spinel`, one process further down. Set ONLY on a host that needed a
+# prefix, so a default host's environment is untouched.
+export CPATH := $(OPENSSL_PREFIX)/include$(if $(CPATH),:$(CPATH))
+export LIBRARY_PATH := $(OPENSSL_PREFIX)/lib$(if $(LIBRARY_PATH),:$(LIBRARY_PATH))
+endif
+endif
+endif
 BUNDLED_NATIVE_OBJS = packages/json/sp_json.o packages/stringio/sp_stringio.o packages/strscan/sp_strscan.o packages/base64/sp_base64.o
 ifeq ($(OPENSSL_AVAILABLE),yes)
 BUNDLED_NATIVE_OBJS += packages/openssl/sp_openssl.o
@@ -296,10 +334,10 @@ packages/json/sp_json_mt.o: packages/json/sp_json.c packages/json/sp_json.h \
 # which is parsed only when a program requires it.
 packages/openssl/sp_openssl.o: packages/openssl/sp_openssl.c \
                                lib/spinel/runtime.h lib/sp_alloc.h lib/sp_gc.h lib/sp_types.h
-	$(CC) -c $(COPT) -Wno-all $(SEC_FLAGS) -Ilib -Ipackages/openssl packages/openssl/sp_openssl.c -o $@
+	$(CC) -c $(COPT) -Wno-all $(SEC_FLAGS) $(OPENSSL_CPPFLAGS) -Ilib -Ipackages/openssl packages/openssl/sp_openssl.c -o $@
 packages/openssl/sp_openssl_mt.o: packages/openssl/sp_openssl.c \
                                   lib/spinel/runtime.h lib/sp_alloc.h lib/sp_gc.h lib/sp_types.h
-	$(CC) -c $(COPT) -Wno-all $(SEC_FLAGS) $(PKG_MT_FLAGS) -Ilib -Ipackages/openssl packages/openssl/sp_openssl.c -o $@
+	$(CC) -c $(COPT) -Wno-all $(SEC_FLAGS) $(PKG_MT_FLAGS) $(OPENSSL_CPPFLAGS) -Ilib -Ipackages/openssl packages/openssl/sp_openssl.c -o $@
 
 # stringio is a native-bound spin package (Path B typed object): the struct,
 # every method, and the header live in the package; the compiler knows it only
