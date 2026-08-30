@@ -7019,7 +7019,12 @@ static int emit_class_new_call(Compiler *c, int id, Buf *b) {
               else emit_expr(c, vnode, &mv);
             }
             else if (cls->ivar_types[a] == TY_POLY && comp_ntype(c, vnode) != TY_POLY) emit_boxed(c, vnode, &mv);
-            else emit_expr(c, vnode, &mv);
+            /* an unresolved call's raise token is an sp_RbVal; coerce it to
+               the member's slot type as every ordinary argument site does, or
+               the C build stops at a line past the file's end with neither
+               the method nor the call named (#4216). A non-token value
+               emits unchanged. */
+            else emit_unresolved_coerced(c, vnode, cls->ivar_types[a], &mv);
             if (arg_wants_root(c, cls->ivar_types[a], vnode))
               emit_rooted_operand(c, cls->ivar_types[a], -1, mv.p ? mv.p : "", b);
             else buf_puts(b, mv.p ? mv.p : "");
