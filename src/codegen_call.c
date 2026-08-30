@@ -2364,6 +2364,14 @@ static int emit_concurrency_call(Compiler *c, int id, Buf *b) {
     if ((sp_streq(name, "pop") || sp_streq(name, "shift") || sp_streq(name, "deq")) && argc == 0) {
       buf_puts(b, "sp_Queue_pop("); emit_expr(c, recv, b); buf_puts(b, ")"); return 1;
     }
+    /* #pop(true) / #pop(false): no_wait. CRuby raises ThreadError on empty;
+       we route through sp_Queue_pop_nb and let it raise. The arg is only
+       read for the side-effect of selecting no_wait (any truthy value
+       selects it; only `false` and `nil` keep blocking, and the caller who
+       wrote `pop(false)` should have written `pop` instead). */
+    if ((sp_streq(name, "pop") || sp_streq(name, "shift") || sp_streq(name, "deq")) && argc == 1) {
+      buf_puts(b, "sp_Queue_pop_nb("); emit_expr(c, recv, b); buf_puts(b, ")"); return 1;
+    }
     if ((sp_streq(name, "size") || sp_streq(name, "length")) && argc == 0) {
       buf_puts(b, "sp_Queue_size("); emit_expr(c, recv, b); buf_puts(b, ")"); return 1;
     }
