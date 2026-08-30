@@ -2364,13 +2364,17 @@ static int emit_concurrency_call(Compiler *c, int id, Buf *b) {
     if ((sp_streq(name, "pop") || sp_streq(name, "shift") || sp_streq(name, "deq")) && argc == 0) {
       buf_puts(b, "sp_Queue_pop("); emit_expr(c, recv, b); buf_puts(b, ")"); return 1;
     }
-    /* #pop(true) / #pop(false): no_wait. CRuby raises ThreadError on empty;
-       we route through sp_Queue_pop_nb and let it raise. The arg is only
-       read for the side-effect of selecting no_wait (any truthy value
-       selects it; only `false` and `nil` keep blocking, and the caller who
-       wrote `pop(false)` should have written `pop` instead). */
+    /* #pop(arg): the arg selects no_wait vs blocking. CRuby: truthy -> no_wait
+       (raise ThreadError on empty), false/nil -> blocking. Evaluate the arg
+       exactly once so a side-effecting expression runs once, and stash the
+       receiver so the conditional reads it once. */
     if ((sp_streq(name, "pop") || sp_streq(name, "shift") || sp_streq(name, "deq")) && argc == 1) {
-      buf_puts(b, "sp_Queue_pop_nb("); emit_expr(c, recv, b); buf_puts(b, ")"); return 1;
+      int tq = ++g_tmp, ta = ++g_tmp;
+      buf_printf(b, "({ sp_queue *_t%d = ", tq); emit_expr(c, recv, b);
+      buf_printf(b, "; sp_RbVal _t%d = ", ta); emit_boxed(c, argv[0], b);
+      buf_printf(b, "; sp_poly_truthy(_t%d) ? sp_Queue_pop_nb(_t%d) : sp_Queue_pop(_t%d); })",
+                 ta, tq, tq);
+      return 1;
     }
     if ((sp_streq(name, "size") || sp_streq(name, "length")) && argc == 0) {
       buf_puts(b, "sp_Queue_size("); emit_expr(c, recv, b); buf_puts(b, ")"); return 1;
