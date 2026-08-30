@@ -623,6 +623,10 @@ ext-test: $(SPINEL) $(SP_RT_LIB)
 	  --ext-init Init_ext_kernel \
 	  --ext-entry ExtKernel.triple,ExtKernel.shout,ExtKernel.total,ExtKernel.must_pos \
 	  -o "$$tmp/k.c" >/dev/null 2>&1 || { echo "ext-test: FAIL (emission)"; ok=0; }; \
+	printf 'module M\n  def self.eat(a)\n    a.sort!\n  end\nend\nif __FILE__ == $$0\n  M.eat([2, 1])\nend\n' > "$$tmp/mut.rb"; \
+	if $(SPINEL) "$$tmp/mut.rb" -c --no-line-map --ext-init spx_i --ext-entry M.eat -o "$$tmp/m.c" >"$$tmp/m.out" 2>&1; then \
+	  echo "ext-test: FAIL (a parameter mutation compiled, R4)"; ok=0; \
+	else grep -q "mutates its parameter" "$$tmp/m.out" || { echo "ext-test: FAIL (R4 refused without saying why)"; sed -n 1,3p "$$tmp/m.out"; ok=0; }; fi; \
 	if [ $$ok -eq 1 ]; then \
 	  grep -q "int main" "$$tmp/k.c" && { echo "ext-test: FAIL (main leaked into the library)"; ok=0; }; \
 	  grep -q "toplevel ran" "$$tmp/k.c" || { echo "ext-test: FAIL (toplevel missing from init)"; ok=0; }; \

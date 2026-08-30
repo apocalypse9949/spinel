@@ -8432,6 +8432,68 @@ static int ext_rb_out(TyKind t, const char *expr, Buf *b) {
     default: return 0;
   }
 }
+
+/* R4 (ext-design.md): a mutation of an exported entry's parameter cannot
+   reach the caller -- values cross the boundary by copy -- so the divergence
+   from CRuby would be silent, which is the one thing an extension must never
+   do. Refuse it at compile time, naming the method and the parameter. The
+   check is receiver-syntactic (a direct mutator call on the parameter, or an
+   index write through it); a mutation through an alias or a callee is not
+   caught -- the boundary types keep the surface small, and the error text
+   says copy semantics out loud either way. */
+static int ext_name_mutates(TyKind t, const char *nm) {
+  if (!nm || !*nm) return 0;
+  size_t l = strlen(nm);
+  if (nm[l - 1] == '!') return 1;
+  if (sp_streq(nm, "[]=")) return 1;
+  if (ty_is_array(t)) {
+    static const char *const A[] = { "push", "<<", "append", "pop", "shift",
+      "unshift", "prepend", "insert", "concat", "clear", "delete", "delete_at",
+      "delete_if", "keep_if", "fill", "replace", NULL };
+    for (int i = 0; A[i]; i++) if (sp_streq(nm, A[i])) return 1;
+  }
+  else if (t == TY_STRING || t == TY_STRBUF) {
+    static const char *const S[] = { "<<", "concat", "insert", "replace",
+      "clear", "prepend", "setbyte", NULL };
+    for (int i = 0; S[i]; i++) if (sp_streq(nm, S[i])) return 1;
+  }
+  else if (ty_is_hash(t)) {
+    static const char *const H[] = { "store", "delete", "delete_if", "keep_if",
+      "clear", "replace", "update", NULL };
+    for (int i = 0; H[i]; i++) if (sp_streq(nm, H[i])) return 1;
+  }
+  return 0;
+}
+static void ext_refuse_param_mutation(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  for (int id = 0; id < nt->count; id++) {
+    int si = c->nscope[id];
+    if (si < 0 || si >= c->nscopes || !c->scopes[si].is_ext_entry) continue;
+    NodeKind k = nt_kind(nt, id);
+    const char *mnm = NULL;
+    int recv = -1;
+    if (k == NK_CallNode) { mnm = nt_str(nt, id, "name"); recv = nt_ref(nt, id, "receiver"); }
+    else if (k == NK_IndexOperatorWriteNode || k == NK_IndexAndWriteNode ||
+             k == NK_IndexOrWriteNode) { mnm = "[]="; recv = nt_ref(nt, id, "receiver"); }
+    else continue;
+    if (recv < 0 || nt_kind(nt, recv) != NK_LocalVariableReadNode) continue;
+    const char *pn = nt_str(nt, recv, "name");
+    Scope *sc = &c->scopes[si];
+    LocalVar *lv = pn ? scope_local(sc, pn) : NULL;
+    if (!lv || !lv->is_param) continue;
+    if (!ext_name_mutates(lv->type, mnm)) continue;
+    fprintf(stderr,
+            "spinel: --ext: %s.%s mutates its parameter `%s` (%s): values cross "
+            "the extension boundary by COPY, so the caller's object would not "
+            "see it and the divergence from CRuby would be silent. Return the "
+            "result instead, or work on a local copy (see "
+            "docs/internals/ext-design.md, R4)\n",
+            sc->class_id >= 0 ? c->classes[sc->class_id].name : "?",
+            sc->name ? sc->name : "?", pn, mnm);
+    exit(1);
+  }
+}
+
 static void ext_generate_cruby_shim(Compiler *c) {
   Buf sb; memset(&sb, 0, sizeof sb);
   const char *feat = g_ext_feature ? g_ext_feature : "spinel_ext";
@@ -10043,6 +10105,7 @@ char *codegen_program(const NodeTable *nt) {
   g_needs_proc_poly_argslot = 0;
 
   if (g_ext_init_name) {
+    ext_refuse_param_mutation(c);
     /* the emitted header IS Layer 1's contract: init, the try-frame pair,
        and every entry in its real C signature. A hand shim compiles against
        it, so a type drift breaks the host's build instead of reinterpreting. */
