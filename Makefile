@@ -108,6 +108,15 @@ ifeq ($(OPENSSL_AVAILABLE),yes)
 # prefix, so a default host's environment is untouched.
 export CPATH := $(OPENSSL_PREFIX)/include$(if $(CPATH),:$(CPATH))
 export LIBRARY_PATH := $(OPENSSL_PREFIX)/lib$(if $(LIBRARY_PATH),:$(LIBRARY_PATH))
+# LIBRARY_PATH is the LINKER's search path; it says nothing to the loader.
+# On macOS that is enough -- a Homebrew dylib's install name is absolute
+# (`otool -D` on libssl.dylib prints the keg path), so a linked binary
+# already knows where to find it at run time. An ELF host is the other way
+# round: the -L leaves no RUNPATH behind, so a package test would link and
+# then die at exec with `libssl.so.3: cannot open shared object file`. Same
+# reason as the two above for being an export rather than a flag -- the run
+# is a child process of the test recipe.
+export LD_LIBRARY_PATH := $(OPENSSL_PREFIX)/lib$(if $(LD_LIBRARY_PATH),:$(LD_LIBRARY_PATH))
 endif
 endif
 endif
