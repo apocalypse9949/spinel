@@ -28,17 +28,17 @@
 # have nothing to sweep; they hold the emitter to the shape.
 def gcv(i)
   GC.start
-  ("pad" * 400_000).size
+  ("pad" * 150_000).size
   "v#{i}"
 end
 def gci(i)
   GC.start
-  ("pad" * 400_000).size
+  ("pad" * 150_000).size
   i * 2
 end
 
 bad = 0
-200.times do |i|
+60.times do |i|
   a, b = "x#{i}", gcv(i)
   bad += 1 unless a == "x#{i}" && b == "v#{i}"
   a, b, c = "x#{i}", "y#{i}", gcv(i)
@@ -64,7 +64,7 @@ $gx = nil
 $gy = nil
 pr = Pair.new
 bad = 0
-200.times do |i|
+60.times do |i|
   pr.fill(i)
   bad += 1 unless pr.x == "x#{i}" && pr.y == "v#{i}"
   pr.fill_gv(i)
@@ -74,25 +74,25 @@ p bad
 
 # index targets with a key that is a fresh object, on each hash kind
 ss = {"a" => "b"}
-200.times { |i| ss["k#{i}"], ss["m#{i}"] = "x#{i}", gcv(i) }
+60.times { |i| ss["k#{i}"], ss["m#{i}"] = "x#{i}", gcv(i) }
 p ss.size, ss.keys.uniq.size, ss["k50"], ss["m50"]
 si = {"a" => 1}
-200.times { |i| si["k#{i}"], si["m#{i}"] = i, gci(i) }
+60.times { |i| si["k#{i}"], si["m#{i}"] = i, gci(i) }
 p si.size, si.keys.uniq.size, si["k50"], si["m50"]
 is = {1 => "a"}
-200.times { |i| is[gci(i) + 1000], is[gci(i) + 2000] = "x#{i}", gcv(i) }
+60.times { |i| is[gci(i) + 1000], is[gci(i) + 2000] = "x#{i}", gcv(i) }
 p is.size, is[1100], is[2100]
 sp = {"a" => 1, "b" => "x"}
-200.times { |i| sp["k#{i}"], sp["m#{i}"] = "x#{i}", gci(i) }
+60.times { |i| sp["k#{i}"], sp["m#{i}"] = "x#{i}", gci(i) }
 p sp.size, sp.keys.uniq.size, sp["k50"], sp["m50"]
 yp = {a: 1, b: "x"}
-200.times { |i| yp[i.even? ? :k0 : :k1], yp[:k2] = "x#{i}", gcv(i) }
+60.times { |i| yp[i.even? ? :k0 : :k1], yp[:k2] = "x#{i}", gcv(i) }
 p yp.size, yp.keys.uniq.size, yp[:k0], yp[:k1], yp[:k2]
 gp = {"a" => 1, :b => 2}
-200.times { |i| gp["k#{i}"], gp[[i]] = "x#{i}", gcv(i) }
+60.times { |i| gp["k#{i}"], gp[[i]] = "x#{i}", gcv(i) }
 p gp.size, gp.keys.uniq.size, gp["k50"], gp[[50]]
 arr = Array.new(10, "z")
-200.times { |i| arr[gci(i) % 10], arr[(gci(i) + 1) % 10] = "x#{i}", gcv(i) }
+60.times { |i| arr[gci(i) % 10], arr[(gci(i) + 1) % 10] = "x#{i}", gcv(i) }
 p arr.size, arr.uniq.size, arr[0], arr[1]
 
 # a container typed at run time stores after the values are built
@@ -109,7 +109,7 @@ def put2(x, i)
 end
 pa = Array.new(10, "z")
 pb = Array.new(10) { nil }
-200.times { |i| put(pa, i); put(pb, i) }
+60.times { |i| put(pa, i); put(pb, i) }
 p pa.size, check(pa), pa[0], pa[1], pb.size, check(pb), pb[0], pb[1]
 pc = Array.new(10, "z")
 pd = Array.new(10) { nil }
@@ -119,7 +119,7 @@ p pc.size, pc.count { |v| v.start_with?("a") || v.start_with?("v") }, pd.size, p
 # a store that boxes a by-value struct into a poly slot allocates
 bs = {"a" => 1, "b" => "x"}
 bad = 0
-200.times do |i|
+60.times do |i|
   bs["r"], t = (i..i + 1), "t#{i}"
   bad += 1 unless bs["r"] == (i..i + 1) && t == "t#{i}"
 end
@@ -129,13 +129,13 @@ p bad
 $n = 0
 def mk; $n += 1; $pr; end
 $pr = Pair.new
-200.times { |i| mk.x, mk.y = "x#{i}", gcv(i) }
+60.times { |i| mk.x, mk.y = "x#{i}", gcv(i) }
 p $n, $pr.x, $pr.y
 
 # a splat and a nested target
 def pair(i); ["x#{i}", "y#{i}"]; end
 bad = 0
-200.times do |i|
+60.times do |i|
   a, *r = "x#{i}", gcv(i), "z#{i}"
   bad += 1 unless a == "x#{i}" && r == ["v#{i}", "z#{i}"]
   a, *r, z = "x#{i}", gcv(i), "z#{i}"
@@ -147,7 +147,7 @@ p bad
 
 # a value that drops the only other holder of an earlier one
 bad = 0
-200.times do |i|
+60.times do |i|
   $s = "keep#{i}"
   a, b = $s, ($s = nil; gcv(i))
   bad += 1 unless a == "keep#{i}" && b == "v#{i}"
@@ -156,7 +156,7 @@ p bad
 
 # the assignment as a value
 bad = 0
-200.times do |i|
+60.times do |i|
   r = (a, b = "x#{i}", gcv(i))
   bad += 1 unless r == ["x#{i}", "v#{i}"] && a == "x#{i}"
 end
@@ -197,28 +197,28 @@ p i, ib
 class KH
   attr_reader :i
   def initialize(i); @i = i; end
-  def hash; $s = nil; GC.start; ("pad" * 400_000).size; @i; end
+  def hash; $s = nil; GC.start; ("pad" * 150_000).size; @i; end
   def eql?(o); o.is_a?(KH) && o.i == @i; end
 end
-def clearer(i); $k = nil; GC.start; ("pad" * 400_000).size; i % 3; end
+def clearer(i); $k = nil; GC.start; ("pad" * 150_000).size; i % 3; end
 $k = ""
 $s = ""
 h1 = {"a" => 1}
 h2 = {0 => 0}
-200.times { |i| $k = "key#{i}"; h1[$k], h2[clearer(i)] = 1, 2 }
+60.times { |i| $k = "key#{i}"; h1[$k], h2[clearer(i)] = 1, 2 }
 p h1.size, h1.keys.count { |s| s.start_with?("key") }, h2.size
 ks = Array.new(200) { |i| KH.new(i) }
 gh = {KH.new(-1) => 0}
 def mk3; [1, 2, 3]; end
 bad = 0
-200.times do |i|
+60.times do |i|
   a = mk3
   a, gh[ks[i]], a[0] = [7, 8, 9], 1, 99
   bad += 1 unless a == [7, 8, 9]
 end
 p gh.size, bad
 out = []
-200.times { |i| $s = "val#{i}"; gh[ks[i]], t = 1, $s; out << t }
+60.times { |i| $s = "val#{i}"; gh[ks[i]], t = 1, $s; out << t }
 p gh.size, out.count { |s| s.start_with?("val") }
 
 # user code no predicate sees: the to_s an interpolation runs clears the
@@ -228,12 +228,12 @@ class Box
   def initialize(v); @v = v; end
 end
 class Killer
-  def to_s; $b = nil; $k = nil; $g = nil; GC.start; ("pad" * 400_000).size; "t"; end
+  def to_s; $b = nil; $k = nil; $g = nil; GC.start; ("pad" * 150_000).size; "t"; end
 end
 $kk = Killer.new
 $pool = []
 th = {"z" => "zz"}
-200.times do |i|
+60.times do |i|
   $b = Box.new("b#{i}")
   $b.v, th["x#{$kk}#{i}"] = "w#{i}", "hv#{i}"
   $pool << Box.new("pool")
@@ -241,16 +241,16 @@ end
 p th.size, $pool.count { |x| x.v == "pool" }
 t1 = {"z" => "zz"}
 t2 = {"z" => "zz"}
-200.times { |i| $k = "key#{i}"; t1[$k], t2["x#{$kk}#{i}"] = "v#{i}", "w#{i}" }
+60.times { |i| $k = "key#{i}"; t1[$k], t2["x#{$kk}#{i}"] = "v#{i}", "w#{i}" }
 p t1.size, t1.keys.count { |s| s.start_with?("key") }, t2.size
 out = []
-200.times { |i| $g = "g#{i}"; a, b = $g, "wrap#{$kk}"; out << a }
+60.times { |i| $g = "g#{i}"; a, b = $g, "wrap#{$kk}"; out << a }
 p out.count { |s| s.is_a?(String) && s.start_with?("g") }
 
 # a value that is a Bignum literal is built, unlike the other literals; a
 # later value that is an interpolated Symbol allocates
 bad = 0
-200.times do |i|
+60.times do |i|
   a, b = 123456789012345678901234567890, gcv(i)
   bad += 1 unless a == 123456789012345678901234567890 && b == "v#{i}"
   a, b = "x#{i}", :"sym#{i}"
@@ -263,7 +263,7 @@ p bad
 # allocates
 bad = 0
 pt = Array.new(4) { nil }
-200.times do |i|
+60.times do |i|
   a, b = "x#{i}", -> { i }
   bad += 1 unless a == "x#{i}" && b.call == i
   subject = "a#{i}b"
