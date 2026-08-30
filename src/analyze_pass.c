@@ -1383,6 +1383,45 @@ static int subtree_writes_local(const NodeTable *nt, int id) {
   return 0;
 }
 
+/* Widen every ARRAY ivar read under `node` (a local's write value: a bare
+   @read, or a conditional whose arms read ivars) to the poly array. A local
+   that aliases ivar arrays and then takes a foreign element widens itself,
+   and its reads become a REBUILT copy of the source -- the push lands on
+   the copy and the receiver's own array answers unchanged (#4210). Widening
+   the sources keeps the local's read a plain pointer. Returns 1 on change. */
+static int widen_aliased_array_ivars(Compiler *c, int node, int cls_id) {
+  const NodeTable *nt = c->nt;
+  if (node < 0 || cls_id < 0 || cls_id >= c->nclasses) return 0;
+  NodeKind k = nt_kind(nt, node);
+  int changed = 0;
+  if (k == NK_InstanceVariableReadNode) {
+    const char *nm = nt_str(nt, node, "name");
+    ClassInfo *ci = &c->classes[cls_id];
+    int iv = nm ? comp_ivar_index(ci, nm) : -1;
+    if (iv < 0 || class_ivar_pinned(ci, nm) || ci->ivar_int_table[iv]) return 0;
+    if (ty_is_array(ci->ivar_types[iv]) && ci->ivar_types[iv] != TY_POLY_ARRAY) {
+      sp_ivwatch(nm, "aliased_local_push", ci->ivar_types[iv], TY_POLY_ARRAY);
+      ci->ivar_types[iv] = TY_POLY_ARRAY;
+      changed = 1;
+    }
+    return changed;
+  }
+  if (k == NK_IfNode || k == NK_UnlessNode) {
+    changed |= widen_aliased_array_ivars(c, nt_ref(nt, node, "statements"), cls_id);
+    changed |= widen_aliased_array_ivars(c, nt_ref(nt, node,
+                 k == NK_UnlessNode ? "else_clause" : "subsequent"), cls_id);
+  }
+  else if (k == NK_ElseNode)
+    changed |= widen_aliased_array_ivars(c, nt_ref(nt, node, "statements"), cls_id);
+  else if (k == NK_ParenthesesNode)
+    changed |= widen_aliased_array_ivars(c, nt_ref(nt, node, "body"), cls_id);
+  else if (k == NK_StatementsNode) {
+    int bn = 0; const int *bb = nt_arr(nt, node, "body", &bn);
+    if (bb && bn > 0) changed |= widen_aliased_array_ivars(c, bb[bn - 1], cls_id);
+  }
+  return changed;
+}
+
 int infer_write_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -2376,6 +2415,38 @@ int infer_write_types(Compiler *c) {
          TY_POLY_ARRAY, and re-deriving from that would unify two array kinds
          into the plain poly scalar -- strictly worse than what it replaced. */
       if (ci->ivar_int_table[iv]) continue;
+      /* An UNKNOWN slot here is a fixpoint ORDERING gap, not absent evidence:
+         a push whose value type is already settled (a literal) runs before
+         the ivar's own writes have merged, and seeding the slot with the
+         pushed element's array kind made the later merge unify two typed
+         kinds into the scalar poly box, for good (#4210) -- while a push on
+         a NON-array attribute (`@q = Queue.new; @q.push(x)`) seeded an array
+         the merge then destroyed the Queue with (#4211). Consult the ivar's
+         own direct writes first: a settled non-array write means this push
+         is no array evidence at all, and an array write of another element
+         kind means the slot is the poly array from the start. */
+      if (is_push && ci->ivar_types[iv] == TY_UNKNOWN && inm) {
+        int nonarray_write = 0, other_kind_write = 0;
+        TyKind want0 = ty_array_of(vt);
+        for (int _r = ivw_index_first(&ivw_ix, inm); _r >= 0; _r = ivw_ix.next[_r]) {
+          int _wi = ivw_ix.node[_r];
+          if (nt_kind(nt, _wi) != NK_InstanceVariableWriteNode) continue;
+          const char *_wnm = nt_str(nt, _wi, "name");
+          if (!_wnm || !sp_streq(_wnm, inm)) continue;
+          Scope *_ws = comp_scope_of(c, _wi);
+          int _wcls = _ws ? _ws->class_id : -1;
+          if (_wcls < 0) _wcls = comp_class_index(c, "Toplevel");
+          if (_wcls != ivar_cls_id) continue;
+          int _wv = nt_ref(nt, _wi, "value");
+          if (_wv < 0) continue;
+          TyKind _wt = infer_type(c, _wv);
+          if (_wt == TY_UNKNOWN || _wt == TY_NIL) continue;
+          if (!ty_is_array(_wt)) { nonarray_write = 1; break; }
+          if (_wt != want0 && _wt != TY_POLY_ARRAY) other_kind_write = 1;
+        }
+        if (nonarray_write) continue;
+        if (other_kind_write) vt = TY_POLY;   /* ty_array_of => the poly array */
+      }
       slot = &ci->ivar_types[iv];
       watch_nm = inm;
       /* If the slot is TY_UNKNOWN but has a direct InstanceVariableWriteNode
@@ -2645,6 +2716,28 @@ int infer_write_types(Compiler *c) {
     }
     sp_ivwatch(watch_nm, is_push ? "usage_push" : (is_idx_write ? "usage_idxwrite" : "usage_read"), before, *slot);
     if (*slot != before && !slot_reset) changed = 1;
+    /* A LOCAL that widened to the poly array under a push and whose writes
+       read ivar arrays (directly, or through a conditional's arms) is an
+       ALIAS of those arrays: widen the sources too, or the local's read
+       becomes a rebuilt copy and the push mutates the copy while the
+       receiver's own array answers unchanged (#4210's conditional shape). */
+    if (is_push && *slot == TY_POLY_ARRAY &&
+        rty && sp_streq(rty, "LocalVariableReadNode")) {
+      const char *bn2 = nt_str(nt, recv, "name");
+      Scope *bs2 = bn2 ? comp_scope_of(c, recv) : NULL;
+      int bcls = bs2 ? bs2->class_id : -1;
+      if (bcls < 0) bcls = comp_class_index(c, "Toplevel");
+      if (bn2 && bs2 && bcls >= 0) {
+        int bsid = (int)(bs2 - c->scopes);
+        for (int _r = lw_index_first(&lw_ix, bn2, bsid); _r >= 0; _r = lw_ix.next[_r]) {
+          int _wi = lw_ix.node[_r];
+          if (nt_kind(nt, _wi) != NK_LocalVariableWriteNode) continue;
+          const char *_wn = nt_str(nt, _wi, "name");
+          if (!_wn || !sp_streq(_wn, bn2) || comp_scope_of(c, _wi) != bs2) continue;
+          if (widen_aliased_array_ivars(c, nt_ref(nt, _wi, "value"), bcls)) changed = 1;
+        }
+      }
+    }
   }
 
   /* Propagate container widening across direct local aliases (`b = a`): the
