@@ -1461,8 +1461,8 @@ sp_RbVal sp_Queue_pop(sp_queue *q) {
 }
 
 sp_RbVal sp_Queue_pop_nb(sp_queue *q) {
-  /* Queue#pop(true) / #pop(false). Non-blocking: raise ThreadError on an empty
-     queue, return the value otherwise. A closed queue returns nil. */
+  /* Queue#pop(truthy): no_wait. Raise ThreadError on an empty queue, return
+     the value otherwise. A closed queue returns nil. */
   SCHED_LOCK();
   if (q->len == 0) {
     if (q->closed) { SCHED_UNLOCK(); return sp_box_nil(); }

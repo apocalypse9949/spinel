@@ -159,7 +159,7 @@ sp_queue  *sp_Queue_new(void);
 sp_queue  *sp_SizedQueue_new(sp_int max);          /* SizedQueue.new(max) */
 void       sp_Queue_push(sp_queue *q, sp_RbVal v);  /* #push / #<< / #enq (blocks when full) */
 sp_RbVal   sp_Queue_pop(sp_queue *q);               /* #pop / #shift / #deq (blocks when empty) */
-sp_RbVal   sp_Queue_pop_nb(sp_queue *q);            /* #pop(true) / #pop(false): no_wait, raises ThreadError on empty */
+sp_RbVal   sp_Queue_pop_nb(sp_queue *q);            /* #pop(truthy): no_wait, raises ThreadError on empty */
 sp_int    sp_Queue_size(sp_queue *q);              /* #size / #length */
 sp_bool   sp_Queue_empty(sp_queue *q);             /* #empty? */
 sp_int    sp_Queue_max(sp_queue *q);               /* SizedQueue#max */
