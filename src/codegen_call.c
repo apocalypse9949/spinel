@@ -644,6 +644,93 @@ static void emit_poly_dispatch_key(Compiler *c, int tv, int cls0_cand, Buf *b) {
   buf_puts(b, " : 0x7fffffff)");
 }
 
+/* A poly receiver can hold a Class object at run time. The instance-method
+   arms of a poly dispatch must not claim it: when any user class defines a
+   class method of this name that the call could reach, route a class-tagged
+   value into a class-side switch ahead of the instance switch. Without this a
+   class value either raised (no compatible instance arm left the switch
+   empty) or entered an instance arm and dereferenced the class token as an
+   object pointer -- #4218, the ActionText filter-chain shape, where the raise
+   was the polite form and the deref was a SIGSEGV. Emits
+   `if (tag == SP_TAG_CLASS) { switch ... } else ` and returns 1 when any arm
+   was built; emits nothing and returns 0 otherwise. */
+static int cls_arm_takes_argc(Scope *s, int argc);
+static int emit_poly_cls_value_prearm(Compiler *c, const char *name, int argc,
+                                      const int *atmp, const TyKind *atmp_ty,
+                                      int tv, int tr, TyKind ret, Buf *b) {
+  int ccls8[64], cmi8[64], nc8 = 0;
+  for (int k = 0; k < c->nclasses && nc8 < 64; k++) {
+    if (is_builtin_reopen(c->classes[k].name)) continue;
+    int dc8 = -1;
+    int kmi = comp_cmethod_in_chain(c, k, name, &dc8);
+    if (kmi < 0 || !scope_has_callable_symbol(c, kmi)) continue;
+    Scope *ks = &c->scopes[kmi];
+    /* a yielding / block-taking / rest candidate has no arm this emitter can
+       fill; such a class falls to the default raise */
+    if (ks->yields || (ks->blk_param && ks->blk_param[0]) || ks->rest_idx >= 0)
+      continue;
+    if (!cls_arm_takes_argc(ks, argc)) continue;
+    /* a param and its argument temp both concretely typed but different is a
+       hard C error, not a coercion: that class cannot be this call's target */
+    int incompat8 = 0;
+    for (int a = 0; a < ks->nparams && !incompat8; a++) {
+      int slot = arg_slot_for_param(c, ks, a, argc);
+      if (slot < 0 || slot >= argc || !atmp_ty) continue;
+      LocalVar *pp = ks->pnames && ks->pnames[a] ? scope_local(ks, ks->pnames[a]) : NULL;
+      TyKind pt = pp ? pp->type : TY_POLY;
+      TyKind at0 = atmp_ty[slot];
+      if (pt != TY_POLY && pt != TY_UNKNOWN && at0 != TY_POLY && at0 != TY_UNKNOWN &&
+          pt != at0) incompat8 = 1;
+    }
+    if (incompat8) continue;
+    ccls8[nc8] = k; cmi8[nc8] = kmi; nc8++;
+  }
+  if (nc8 == 0) return 0;
+  buf_printf(b, "if (_t%d.tag == SP_TAG_CLASS) { switch (_t%d.cls_id) {", tv, tv);
+  for (int i = 0; i < nc8; i++) {
+    Scope *ks = &c->scopes[cmi8[i]];
+    TyKind kr = (TyKind)ks->ret;
+    Buf cb; memset(&cb, 0, sizeof cb);
+    emit_method_cname(c, ks, &cb);
+    buf_puts(&cb, "(");
+    /* the receiving-class token, when the body reads it: the class this arm's
+       case selected (#4217) */
+    const char *lead = emit_cmethod_self_cls_arg(c, cmi8[i], ccls8[i], &cb);
+    for (int a = 0; a < ks->nparams; a++) {
+      buf_puts(&cb, a ? ", " : lead);
+      LocalVar *pp = ks->pnames && ks->pnames[a] ? scope_local(ks, ks->pnames[a]) : NULL;
+      TyKind pt = pp ? pp->type : TY_POLY;
+      if (pt == TY_UNKNOWN) pt = TY_POLY;
+      int slot = arg_slot_for_param(c, ks, a, argc);
+      if (slot >= 0 && slot < argc && atmp) {
+        char at[32]; snprintf(at, sizeof at, "_t%d", atmp[slot]);
+        TyKind at0 = atmp_ty ? atmp_ty[slot] : TY_POLY;
+        /* the temp holds the argument in its own C type; box it up for a poly
+           param, hand it raw to a matching one, unbox a poly temp down */
+        if (at0 == TY_POLY && pt == TY_POLY) buf_puts(&cb, at);
+        else if (at0 == TY_POLY) emit_unbox_text(c, pt, at, &cb);
+        else if (pt == TY_POLY) emit_boxed_text(c, at0, at, &cb);
+        else buf_puts(&cb, at);
+      }
+      else emit_arg_or_default(c, ks, a, -1, &cb);
+    }
+    buf_puts(&cb, ")");
+    buf_printf(b, " case %d: ", ccls8[i]);
+    if (method_is_void(ks)) buf_puts(b, cb.p ? cb.p : "");
+    else {
+      buf_printf(b, "_t%d = ", tr);
+      if (ret == TY_POLY && kr != TY_POLY) emit_boxed_text(c, kr, cb.p ? cb.p : "", b);
+      else if (ret != TY_POLY && kr == TY_POLY) emit_unbox_text(c, ret, cb.p ? cb.p : "", b);
+      else buf_puts(b, cb.p ? cb.p : "");
+    }
+    buf_puts(b, "; break;");
+    free(cb.p);
+  }
+  buf_printf(b, " default: sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;",
+             name, tv);
+  buf_puts(b, " } }\nelse ");
+  return 1;
+}
 
 /* Compiler-synthesized instance methods that must stay invisible to
    reflection (respond_to?, instance_methods): they are implementation detail
@@ -4694,6 +4781,9 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       int cls0_cand = ((cls0_mi >= 0 && c->scopes[cls0_mi].nrequired == 0) ||
                        (c->nclasses > 0 && comp_reader_in_chain(c, 0, name, &cls0_rd))) &&
                       c->nclasses > 0 && c->classes[0].instantiated;
+      /* a class-valued receiver dispatches class-side, ahead of the instance
+         arms (#4218) */
+      emit_poly_cls_value_prearm(c, name, 0, NULL, NULL, tv, tr, ret, b);
       buf_puts(b, "switch (");
       emit_poly_dispatch_key(c, tv, cls0_cand, b);
       buf_puts(b, ") {");
@@ -5515,6 +5605,11 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         if (fills0 == 0) fills0 = kwh_named_kwarg_fills(c, &c->scopes[cls0_mi2], kwh);
         cls0_cand2 = pos_argc + fills0 >= c->scopes[cls0_mi2].nrequired;
       }
+      /* a class-valued receiver dispatches class-side, ahead of the instance
+         arms (#4218). Positional calls only: the keyword-hash split binds by
+         name against a specific candidate, which this pre-arm does not do. */
+      if (kwh < 0)
+        emit_poly_cls_value_prearm(c, name, argc, atmp, atmp_ty, tv, tr, ret, b);
       buf_puts(b, "switch (");
       emit_poly_dispatch_key(c, tv, cls0_cand2, b);
       buf_puts(b, ") {");
