@@ -6542,10 +6542,15 @@ void emit_rest_pack_kwh(Compiler *c, int from, int pos_argc, const int *argv, in
     if (aty && sp_streq(aty, "SplatNode")) {
       int inner = nt_ref(nt, argv[i], "expression");
       Buf arr; memset(&arr, 0, sizeof arr);
-      TyKind at;
-      if (inner >= 0) { at = comp_ntype(c, inner); emit_expr(c, inner, &arr); }
-      else if (emit_anon_rest_ref(c, argv[i], &arr)) at = TY_POLY_ARRAY;  /* anonymous `*` */
-      else at = TY_UNKNOWN;
+      TyKind at = inner >= 0 ? comp_ntype(c, inner) : TY_UNKNOWN;
+      /* render the operand only for the arms that read this rendering: a
+         render writes the operand's setup into the statement prelude, so a
+         discarded one still ran there, and a side-effecting operand ran
+         twice */
+      int reads_arr = at == TY_INT_ARRAY || at == TY_STR_ARRAY ||
+                      at == TY_FLOAT_ARRAY || at == TY_POLY_ARRAY;
+      if (inner >= 0 && reads_arr) emit_expr(c, inner, &arr);
+      else if (inner < 0 && emit_anon_rest_ref(c, argv[i], &arr)) at = TY_POLY_ARRAY;  /* anonymous `*` */
       const char *ap = arr.p ? arr.p : "NULL";
       if (at == TY_INT_ARRAY)
         buf_printf(b, " { sp_IntArray *_sa = %s; for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, sp_box_int(_sa->data[_sa->start+_si])); }", ap, t);
@@ -6555,6 +6560,15 @@ void emit_rest_pack_kwh(Compiler *c, int from, int pos_argc, const int *argv, in
         buf_printf(b, " { sp_FloatArray *_sa = %s; for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, sp_box_float(_sa->data[_si])); }", ap, t);
       else if (at == TY_POLY_ARRAY)
         buf_printf(b, " { sp_PolyArray *_sa = %s; for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, _sa->data[_si]); }", ap, t);
+      /* a boxed operand is an array only at run time: the splat's lowering
+         normalizes it, and its elements are the rest's, where the operand
+         once went in whole as one element */
+      else if (inner >= 0 && (at == TY_POLY || at == TY_UNKNOWN)) {
+        Buf el; memset(&el, 0, sizeof el);
+        emit_expr(c, argv[i], &el);
+        buf_printf(b, " { sp_PolyArray *_sa = %s; SP_GC_ROOT(_sa); for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, _sa->data[_si]); }", el.p ? el.p : "NULL", t);
+        free(el.p);
+      }
       else { /* scalar splat: single element */
         Buf el; memset(&el, 0, sizeof el);
         emit_boxed(c, inner, &el);
@@ -7026,6 +7040,25 @@ static void args_raise(const char *fmt, ...) {
   buf_printf(g_pre, "sp_raise_cls(\"ArgumentError\", \"%s\");\n", msg);
 }
 
+/* The positional count a rest-parameter method requires, when a call that
+   supplies fewer is judged: the parameters without a default, the rest and
+   any keyword left out. -1 when it is not judged -- no rest, a keyword or
+   keyword-rest parameter (those bind by other rules), a synthesized
+   parameter or scope. One rule for the raise in emit_args_filled and for a
+   dispatch that lists candidates by what the call's count allows, so a
+   candidate the raise would refuse is never emitted as an arm (#3520). */
+int rest_shortfall_required(Compiler *c, Scope *m) {
+  if (m->rest_idx < 0 || m->kwrest_idx >= 0 || m->cs_synth) return -1;
+  int nreq = 0;
+  for (int i = 0; i < m->nparams; i++) {
+    if (i == m->rest_idx) continue;
+    if (!m->pnames[i] || (m->pnames[i][0] == '_' && m->pnames[i][1] == '_') ||
+        callee_has_kwarg(c, m, m->pnames[i])) return -1;
+    if (!m->pdefault || m->pdefault[i] < 0) nreq++;
+  }
+  return nreq;
+}
+
 void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lead, Buf *out) {
   Scope *m = &c->scopes[callee_idx];
   const NodeTable *nt = c->nt;
@@ -7103,7 +7136,15 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
       nfixed++;
       if (!m->pdefault || m->pdefault[i] < 0) nreq++;
     }
-    if (!has_splat && !has_ds && !synth &&
+    /* A target with a rest parameter has no upper bound, so only its shortfall
+       is judged: `def f(a, *r)` called bare ran the body with a padded a. */
+    int rest_req = rest_shortfall_required(c, m);
+    if (!has_splat && !has_ds && rest_req >= 0) {
+      int eff_pos = pos_argc + (kwh >= 0 ? 1 : 0);
+      if (eff_pos < rest_req)
+        args_raise("wrong number of arguments (given %d, expected %d+)", eff_pos, rest_req);
+    }
+    else if (!has_splat && !has_ds && !synth &&
         m->rest_idx < 0 && m->kwrest_idx < 0 && !m->cs_synth) {
       int kw_matches = 0;
       if (kwh >= 0)
@@ -7200,7 +7241,13 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
         Buf anon; memset(&anon, 0, sizeof anon);
         int is_anon = inner < 0 && emit_anon_rest_ref(c, argv[k], &anon);
         if (is_anon) splat_at = TY_POLY_ARRAY;
-        if (is_anon || ty_is_array(splat_at) || splat_at == TY_POLY_ARRAY) {
+        /* a boxed operand -- a block parameter, a value read out of a
+           container -- is an array only at run time: the splat's own
+           lowering normalizes it (nil to [], a scalar to [v], an array kept),
+           where it once fell through as one positional argument */
+        int boxed = !is_anon && inner >= 0 && (splat_at == TY_POLY || splat_at == TY_UNKNOWN);
+        if (boxed) splat_at = TY_POLY_ARRAY;
+        if (is_anon || boxed || ty_is_array(splat_at) || splat_at == TY_POLY_ARRAY) {
           splat_tmp = ++g_tmp;
           /* Evaluate the splat operand into a side buffer: a literal array or a
              call result emits its own setup (a fresh `_tN = ..._new()` decl)
@@ -7213,7 +7260,7 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
           }
           else {
             Buf sb; memset(&sb, 0, sizeof sb);
-            emit_expr(c, inner, &sb);
+            emit_expr(c, boxed ? argv[k] : inner, &sb);
             emit_ctype(c, splat_at, g_pre);
             buf_printf(g_pre, " _t%d = %s;\n", splat_tmp, sb.p ? sb.p : "");
             free(sb.p);
@@ -7670,7 +7717,10 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
       Buf anon; memset(&anon, 0, sizeof anon);
       int is_anon = inner < 0 && emit_anon_rest_ref(c, argv[k], &anon);
       if (is_anon) splat_at_d = TY_POLY_ARRAY;
-      if (is_anon || ty_is_array(splat_at_d) || splat_at_d == TY_POLY_ARRAY) {
+      /* a boxed operand is normalized by the splat's own lowering, as above */
+      int boxed = !is_anon && inner >= 0 && (splat_at_d == TY_POLY || splat_at_d == TY_UNKNOWN);
+      if (boxed) splat_at_d = TY_POLY_ARRAY;
+      if (is_anon || boxed || ty_is_array(splat_at_d) || splat_at_d == TY_POLY_ARRAY) {
         splat_idx_d = k;
         splat_tmp_d = ++g_tmp;
         emit_indent(g_pre, g_indent);
@@ -7680,7 +7730,7 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
         }
         else {
           Buf sb; memset(&sb, 0, sizeof sb);
-          emit_expr(c, inner, &sb);
+          emit_expr(c, boxed ? argv[k] : inner, &sb);
           emit_ctype(c, splat_at_d, g_pre);
           buf_printf(g_pre, " _t%d = %s;\n", splat_tmp_d, sb.p ? sb.p : "");
           free(sb.p);
