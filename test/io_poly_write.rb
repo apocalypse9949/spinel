@@ -19,4 +19,4 @@ end
 r, w = Socket.pair(Socket::AF_UNIX, Socket::SOCK_STREAM, 0)
 n = w.write("hello")
 raise "wrote=#{n}" unless n == 5
-$stderr.puts "ok"
+puts "ok"
