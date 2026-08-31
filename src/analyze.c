@@ -9256,6 +9256,59 @@ static int strbuf_container_stores_string(Compiler *c, const char *contn, Scope 
   }
   return 0;
 }
+/* The complement of the test above: some value stored into this container is
+   provably NOT a string. Such a container is heterogeneous, so a local bound
+   from one of its elements is not an alias for a string, whatever the
+   mutator-name table says about the calls made on it (#4240). Only a store
+   whose type the analysis actually knows counts -- an UNKNOWN one says
+   nothing, and answering yes on it would give up the promotion everywhere. */
+static int strbuf_container_stores_nonstring(Compiler *c, const char *contn, Scope *conts) {
+  const NodeTable *nt = c->nt;
+  for (int w = 0; w < nt->count; w++) {
+    int stores[64]; int nst = 0;
+    NodeKind wk = nt_kind(nt, w);
+    if (wk == NK_LocalVariableWriteNode) {
+      const char *wn = nt_str(nt, w, "name");
+      if (!wn || !sp_streq(wn, contn) || comp_scope_of(c, w) != conts) continue;
+      int val = nt_ref(nt, w, "value");
+      if (val < 0) continue;
+      NodeKind vk = nt_kind(nt, val);
+      if (vk == NK_ArrayNode) {
+        int en = 0; const int *el = nt_arr(nt, val, "elements", &en);
+        for (int e = 0; e < en && nst < 64; e++) stores[nst++] = el[e];
+      }
+      else if (vk == NK_HashNode || vk == NK_KeywordHashNode) {
+        int en = 0; const int *el = nt_arr(nt, val, "elements", &en);
+        for (int e = 0; e < en && nst < 64; e++)
+          if (nt_kind(nt, el[e]) == NK_AssocNode) stores[nst++] = nt_ref(nt, el[e], "value");
+      }
+    }
+    else if (wk == NK_CallNode) {
+      int wr = nt_ref(nt, w, "receiver");
+      if (wr < 0 || nt_kind(nt, wr) != NK_LocalVariableReadNode) continue;
+      const char *wrn = nt_str(nt, wr, "name");
+      if (!wrn || !sp_streq(wrn, contn) || comp_scope_of(c, wr) != conts) continue;
+      const char *wcn = nt_str(nt, w, "name");
+      if (!wcn) continue;
+      int a = nt_ref(nt, w, "arguments");
+      int an = 0; const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+      if (sp_streq(wcn, "<<") || sp_streq(wcn, "push") ||
+          sp_streq(wcn, "append") || sp_streq(wcn, "unshift")) {
+        for (int e = 0; e < an && nst < 64; e++) stores[nst++] = av[e];
+      }
+      else if (sp_streq(wcn, "[]=") && an >= 2) stores[nst++] = av[an - 1];
+      else continue;
+    }
+    else continue;
+    for (int e = 0; e < nst; e++) {
+      TyKind st = stores[e] >= 0 ? infer_type(c, stores[e]) : TY_UNKNOWN;
+      if (st == TY_UNKNOWN || st == TY_POLY || st == TY_STRING || st == TY_STRBUF)
+        continue;
+      return 1;
+    }
+  }
+  return 0;
+}
 static int strbuf_demand_container_stores(Compiler *c, const char *contn, Scope *conts) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -10041,6 +10094,13 @@ static int promote_shared_stored_strings(Compiler *c) {
        reads as a string append. Require the container to actually hold a
        string somewhere before treating the binding as a string alias. */
     if (!strbuf_container_stores_string(c, contn5, conts5)) continue;
+    /* ...and holds NOTHING BUT strings. A heterogeneous container passes the
+       test above on its string element while the local is bound from another
+       one: `box = [Frag.new(h), "s"]; f = box[0]; f.replace(sel)` bound f to a
+       string handle and ran String#replace on a Frag, answering the argument
+       (#4240). The alias only means what it says when every element is a
+       string. */
+    if (strbuf_container_stores_nonstring(c, contn5, conts5)) continue;
     changed |= strbuf_demand_container_stores(c, contn5, conts5);
     if (!c->strbuf_box[wv]) { c->strbuf_box[wv] = 1; changed = 1; }
     if (llv5->type != TY_POLY && (llv5->type != TY_STRBUF || !llv5->str_shared))

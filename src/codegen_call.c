@@ -6392,11 +6392,24 @@ else {
           !is_push && !is_cover && !is_gcdlcm && !is_strdel && !is_strsplit &&
           !is_pdelete && !is_pdig && !is_pvalues_at && !is_pfirstn && !is_pmerge) {
         buf_puts(b, " default:");
+        /* `replace` reaches this dispatch only because a user class owns the
+           name; a String, Array or Hash receiver still has to be replaced
+           rather than told it has no such method. Same shape as the to_i /
+           to_h / join arms of the zero-argument dispatch (#4240). */
+        if (sp_streq(name, "replace") && argc == 1 && ret == TY_POLY) {
+          Buf rb9; memset(&rb9, 0, sizeof rb9);
+          { char tn9[32]; snprintf(tn9, sizeof tn9, "_t%d", atmp[0]);
+            if (atmp_ty[0] == TY_POLY) buf_puts(&rb9, tn9);
+            else emit_boxed_text(c, atmp_ty[0], tn9, &rb9); }
+          buf_printf(b, " _t%d = sp_poly_replace(_t%d, %s); break;",
+                     tr, tv, rb9.p ? rb9.p : "sp_box_nil()");
+          free(rb9.p);
+        }
         /* index/rindex also belong to String, whose box carries no cls_id, so
            no case above can claim it. Answer it here, ahead of the raise, or a
            substring search on a boxed String reports a missing method (#3445).
            find_index is Enumerable-only and keeps falling through. */
-        if (is_arr_index && !sp_streq(name, "find_index")) {
+        else if (is_arr_index && !sp_streq(name, "find_index")) {
           int tsi = ++g_tmp;
           Buf ab5; memset(&ab5, 0, sizeof ab5);
           { char tn5[32]; snprintf(tn5, sizeof tn5, "_t%d", atmp[0]);

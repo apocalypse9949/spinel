@@ -12963,8 +12963,13 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
     return 1;
   }
-  /* poly receiver: replace(other) -> runtime dispatch (nullable array). */
-  if (recv >= 0 && rt == TY_POLY && sp_streq(name, "replace") && argc == 1) {
+  /* poly receiver: replace(other) -> runtime dispatch (nullable array). The
+     user-definition test its `pack` sibling below already carries: a user
+     class owning the name means the runtime class decides, and taking the
+     builtin here ran String#replace on an object -- answering the argument,
+     silently (#4240). */
+  if (recv >= 0 && rt == TY_POLY && sp_streq(name, "replace") && argc == 1 &&
+      !user_defines_or_reads(c, name)) {
     buf_puts(b, "sp_poly_replace("); emit_expr(c, recv, b);
     buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
     return 1;
