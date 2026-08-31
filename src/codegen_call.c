@@ -5224,6 +5224,18 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         else buf_puts(b, jv);
         buf_puts(b, "; break;");
       }
+      /* IO#flush on a poly value: the zero-arg sibling of the write arm in
+         the argument-carrying dispatch. A Socket or File reaches this switch
+         when any user class owns the name and fell to the raise default
+         without an arm of its own (#4227). CRuby answers the receiver. */
+      if (argc == 0 && sp_streq(name, "flush")) {
+        buf_printf(b, " case SP_BUILTIN_IO: ");
+        if (ret == TY_POLY)
+          buf_printf(b, "sp_File_flush((sp_File *)_t%d.v.p); _t%d = _t%d;", tv, tr, tv);
+        else
+          buf_printf(b, "_t%d = sp_File_flush((sp_File *)_t%d.v.p);", tr, tv);
+        buf_puts(b, " break;");
+      }
       /* And once more for `__enum_to_a`, which is not a name a user writes:
          the Enumerable desugar puts it in front of `obj.map { }` when the
          receiver's class defines #each. That rewrite is on the AST and
