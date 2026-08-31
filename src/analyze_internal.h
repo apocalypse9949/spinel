@@ -69,6 +69,7 @@ int is_builtin_class_name(const char *n);
 int is_builtin_module_name(const char *n);
 int is_builtin_exception_name(const char *n);
 int builtin_method_known(const char *cls, const char *m);
+int builtin_arity_violation(Compiler *c, int id);
 int is_handler_proc_block(Compiler *c, int id);
 int builtin_class_id(const char *name);
 int builtin_object_method_known(const char *m);

@@ -9875,26 +9875,33 @@ static int emit_range_step_bad_stride(Compiler *c, int id, int recv, int arg,
   buf_printf(b, "%s; })", dv ? dv : "0");
   return 1;
 }
+/* A row of the two spec tables below; the instance table's comment says
+   how to read one. */
+typedef struct { const char *cls; const char *m; int min; int max;
+                 const char *lo_exp; const char *hi_exp;
+                 int blk_min; int blk_max;
+                 const char *blk_lo_exp; const char *blk_hi_exp; } SpAritySpec;
+
 /* A call whose argument count CRuby's own method cannot take: evaluate the
    receiver and arguments for effect, then raise CRuby's ArgumentError --
    instead of falling into an emitter specialized to another count, where a
    missing operand read argv[] blind (a compile-time SIGSEGV) and an extra one
    was silently dropped. Conservative by construction: fires only when the
    dumped CRuby arity table proves the count wrong, never on a call whose
-   runtime count a splat / kwargs / forwarding keeps open, and never when a
-   reopened builtin owns the name. */
+   runtime count a splat / kwargs / forwarding keeps open, and never when
+   the program owns the name -- a def in the enclosing chain, at top level
+   or in a reopened builtin, a singleton def or accessor on the constant, a
+   module's own method behind `extend self`. */
 /* Positional-arity spec for the builtin instance surface, probed from
    ruby 4.0.6 by tools/gen_builtin_arity_spec.rb (see there for the
    technique; rerun it with --write to regenerate both tables). max -1 =
    no upper bound; a NULL exp = that side is never violated. The first
    quartet describes the bare call, the blk_ quartet the block-carrying
    call (several counts change under a block: Array#fill 1..3 vs 0..2,
-   Integer#step); a quartet the probe could not prove is -1,-1,NULL,NULL
-   and never fires. */
-static const struct { const char *cls; const char *m; int min; int max;
-                      const char *lo_exp; const char *hi_exp;
-                      int blk_min; int blk_max;
-                      const char *blk_lo_exp; const char *blk_hi_exp; }
+   Integer#step); a quartet the probe could not prove, or a name whose
+   counts are its target's (Proc#call, Enumerator#each), is
+   -1,-1,NULL,NULL and never fires. */
+static const SpAritySpec
 sp_builtin_arity_spec_tbl[] = {
   {"String","%",1,1,"1","1",1,1,"1","1"},
   {"String","*",1,1,"1","1",1,1,"1","1"},
@@ -9955,6 +9962,7 @@ sp_builtin_arity_spec_tbl[] = {
   {"String","encoding",0,0,NULL,"0",0,0,NULL,"0"},
   {"String","eql?",1,1,"1","1",1,1,"1","1"},
   {"String","force_encoding",1,1,"1","1",1,1,"1","1"},
+  {"String","freeze",0,0,NULL,"0",0,0,NULL,"0"},
   {"String","getbyte",1,1,"1","1",1,1,"1","1"},
   {"String","grapheme_clusters",0,0,NULL,"0",0,0,NULL,"0"},
   {"String","gsub",1,2,"1..2","1..2",1,2,"1..2","1..2"},
@@ -10259,6 +10267,7 @@ sp_builtin_arity_spec_tbl[] = {
   {"Array","flat_map",0,0,NULL,"0",0,0,NULL,"0"},
   {"Array","flatten",0,1,NULL,"0..1",0,1,NULL,"0..1"},
   {"Array","flatten!",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Array","freeze",0,0,NULL,"0",0,0,NULL,"0"},
   {"Array","grep",1,1,"1","1",1,1,"1","1"},
   {"Array","grep_v",1,1,"1","1",1,1,"1","1"},
   {"Array","group_by",0,0,NULL,"0",0,0,NULL,"0"},
@@ -10386,6 +10395,7 @@ sp_builtin_arity_spec_tbl[] = {
   {"Hash","first",0,1,NULL,"0..1",0,1,NULL,"0..1"},
   {"Hash","flat_map",0,0,NULL,"0",0,0,NULL,"0"},
   {"Hash","flatten",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Hash","freeze",0,0,NULL,"0",0,0,NULL,"0"},
   {"Hash","grep",1,1,"1","1",1,1,"1","1"},
   {"Hash","grep_v",1,1,"1","1",1,1,"1","1"},
   {"Hash","group_by",0,0,NULL,"0",0,0,NULL,"0"},
@@ -10733,6 +10743,7 @@ sp_builtin_arity_spec_tbl[] = {
   {"Object","eql?",1,1,"1","1",1,1,"1","1"},
   {"Object","equal?",1,1,"1","1",1,1,"1","1"},
   {"Object","extend",1,-1,"1+",NULL,1,-1,"1+",NULL},
+  {"Object","freeze",0,0,NULL,"0",0,0,NULL,"0"},
   {"Object","frozen?",0,0,NULL,"0",0,0,NULL,"0"},
   {"Object","hash",0,0,NULL,"0",0,0,NULL,"0"},
   {"Object","inspect",0,0,NULL,"0",0,0,NULL,"0"},
@@ -10946,6 +10957,7 @@ sp_builtin_arity_spec_tbl[] = {
   {"Pathname","find",0,0,NULL,"0",0,0,NULL,"0"},
   {"Pathname","fnmatch",1,-1,"1+",NULL,1,-1,"1+",NULL},
   {"Pathname","fnmatch?",1,-1,"1+",NULL,1,-1,"1+",NULL},
+  {"Pathname","freeze",0,0,NULL,"0",0,0,NULL,"0"},
   {"Pathname","ftype",0,0,NULL,"0",0,0,NULL,"0"},
   {"Pathname","glob",1,2,"1..2","1..2",1,2,"1..2","1..2"},
   {"Pathname","grpowned?",0,0,NULL,"0",0,0,NULL,"0"},
@@ -11110,18 +11122,608 @@ sp_builtin_arity_spec_tbl[] = {
   {"Mutex","synchronize",0,0,NULL,"0",0,0,NULL,"0"},
   {"Mutex","try_lock",0,0,NULL,"0",0,0,NULL,"0"},
   {"Mutex","unlock",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Regexp","==",1,1,"1","1",1,1,"1","1"},
+  {"Regexp","===",1,1,"1","1",1,1,"1","1"},
+  {"Regexp","=~",1,1,"1","1",1,1,"1","1"},
+  {"Regexp","casefold?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Regexp","encoding",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Regexp","eql?",1,1,"1","1",1,1,"1","1"},
+  {"Regexp","fixed_encoding?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Regexp","hash",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Regexp","inspect",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Regexp","match",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Regexp","match?",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Regexp","named_captures",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Regexp","names",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Regexp","options",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Regexp","source",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Regexp","timeout",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Regexp","to_s",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Regexp","~",0,0,NULL,"0",0,0,NULL,"0"},
+  {"MatchData","==",1,1,"1","1",1,1,"1","1"},
+  {"MatchData","[]",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"MatchData","begin",1,1,"1","1",1,1,"1","1"},
+  {"MatchData","bytebegin",1,1,"1","1",1,1,"1","1"},
+  {"MatchData","byteend",1,1,"1","1",1,1,"1","1"},
+  {"MatchData","byteoffset",1,1,"1","1",1,1,"1","1"},
+  {"MatchData","captures",0,0,NULL,"0",0,0,NULL,"0"},
+  {"MatchData","deconstruct",0,0,NULL,"0",0,0,NULL,"0"},
+  {"MatchData","deconstruct_keys",1,1,"1","1",1,1,"1","1"},
+  {"MatchData","end",1,1,"1","1",1,1,"1","1"},
+  {"MatchData","eql?",1,1,"1","1",1,1,"1","1"},
+  {"MatchData","hash",0,0,NULL,"0",0,0,NULL,"0"},
+  {"MatchData","inspect",0,0,NULL,"0",0,0,NULL,"0"},
+  {"MatchData","length",0,0,NULL,"0",0,0,NULL,"0"},
+  {"MatchData","match",1,1,"1","1",1,1,"1","1"},
+  {"MatchData","match_length",1,1,"1","1",1,1,"1","1"},
+  {"MatchData","named_captures",0,0,NULL,"0",0,0,NULL,"0"},
+  {"MatchData","names",0,0,NULL,"0",0,0,NULL,"0"},
+  {"MatchData","offset",1,1,"1","1",1,1,"1","1"},
+  {"MatchData","post_match",0,0,NULL,"0",0,0,NULL,"0"},
+  {"MatchData","pre_match",0,0,NULL,"0",0,0,NULL,"0"},
+  {"MatchData","regexp",0,0,NULL,"0",0,0,NULL,"0"},
+  {"MatchData","size",0,0,NULL,"0",0,0,NULL,"0"},
+  {"MatchData","string",0,0,NULL,"0",0,0,NULL,"0"},
+  {"MatchData","to_a",0,0,NULL,"0",0,0,NULL,"0"},
+  {"MatchData","to_s",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Proc","<<",1,1,"1","1",1,1,"1","1"},
+  {"Proc","==",1,1,"1","1",1,1,"1","1"},
+  {"Proc",">>",1,1,"1","1",1,1,"1","1"},
+  {"Proc","arity",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Proc","binding",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Proc","clone",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Proc","curry",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Proc","dup",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Proc","eql?",1,1,"1","1",1,1,"1","1"},
+  {"Proc","hash",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Proc","inspect",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Proc","lambda?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Proc","parameters",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Proc","ruby2_keywords",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Proc","source_location",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Proc","to_proc",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Proc","to_s",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Proc","call",-1,-1,NULL,NULL,-1,-1,NULL,NULL},
+  {"Proc","[]",-1,-1,NULL,NULL,-1,-1,NULL,NULL},
+  {"Proc","===",-1,-1,NULL,NULL,-1,-1,NULL,NULL},
+  {"Proc","yield",-1,-1,NULL,NULL,-1,-1,NULL,NULL},
+  {"Method","<<",1,1,"1","1",1,1,"1","1"},
+  {"Method","==",1,1,"1","1",1,1,"1","1"},
+  {"Method",">>",1,1,"1","1",1,1,"1","1"},
+  {"Method","arity",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Method","box",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Method","clone",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Method","curry",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Method","dup",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Method","eql?",1,1,"1","1",1,1,"1","1"},
+  {"Method","hash",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Method","inspect",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Method","name",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Method","original_name",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Method","owner",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Method","parameters",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Method","receiver",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Method","source_location",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Method","super_method",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Method","to_proc",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Method","to_s",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Method","unbind",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Method","call",-1,-1,NULL,NULL,-1,-1,NULL,NULL},
+  {"Method","[]",-1,-1,NULL,NULL,-1,-1,NULL,NULL},
+  {"Method","===",-1,-1,NULL,NULL,-1,-1,NULL,NULL},
+  {"Fiber","alive?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Fiber","backtrace",0,2,NULL,"0..2",0,2,NULL,"0..2"},
+  {"Fiber","backtrace_locations",0,2,NULL,"0..2",0,2,NULL,"0..2"},
+  {"Fiber","blocking?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Fiber","inspect",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Fiber","kill",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Fiber","raise",0,3,NULL,"0..3",0,3,NULL,"0..3"},
+  {"Fiber","storage",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Fiber","storage=",1,1,"1","1",1,1,"1","1"},
+  {"Fiber","to_s",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","[]",1,1,"1","1",1,1,"1","1"},
+  {"Thread","[]=",2,2,"2","2",2,2,"2","2"},
+  {"Thread","abort_on_exception",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","abort_on_exception=",1,1,"1","1",1,1,"1","1"},
+  {"Thread","add_trace_func",1,1,"1","1",1,1,"1","1"},
+  {"Thread","alive?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","fetch",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Thread","group",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","inspect",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","join",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Thread","key?",1,1,"1","1",1,1,"1","1"},
+  {"Thread","keys",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","kill",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","name",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","name=",1,1,"1","1",1,1,"1","1"},
+  {"Thread","native_thread_id",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","priority",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","priority=",1,1,"1","1",1,1,"1","1"},
+  {"Thread","report_on_exception",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","report_on_exception=",1,1,"1","1",1,1,"1","1"},
+  {"Thread","run",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","set_trace_func",1,1,"1","1",1,1,"1","1"},
+  {"Thread","status",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","stop?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","terminate",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","thread_variable?",1,1,"1","1",1,1,"1","1"},
+  {"Thread","thread_variable_get",1,1,"1","1",1,1,"1","1"},
+  {"Thread","thread_variable_set",2,2,"2","2",2,2,"2","2"},
+  {"Thread","thread_variables",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","to_s",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","value",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","wakeup",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Queue","clear",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Queue","close",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Queue","closed?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Queue","deq",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Queue","empty?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Queue","length",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Queue","marshal_dump",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Queue","num_waiting",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Queue","pop",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Queue","shift",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Queue","size",0,0,NULL,"0",0,0,NULL,"0"},
+  {"ConditionVariable","broadcast",0,0,NULL,"0",0,0,NULL,"0"},
+  {"ConditionVariable","marshal_dump",0,0,NULL,"0",0,0,NULL,"0"},
+  {"ConditionVariable","signal",0,0,NULL,"0",0,0,NULL,"0"},
+  {"ConditionVariable","wait",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"File","<<",1,1,"1","1",1,1,"1","1"},
+  {"File","advise",1,3,"1..3","1..3",1,3,"1..3","1..3"},
+  {"File","all?",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"File","any?",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"File","atime",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","autoclose=",1,1,"1","1",1,1,"1","1"},
+  {"File","autoclose?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","binmode",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","binmode?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","birthtime",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","chmod",1,1,"1","1",1,1,"1","1"},
+  {"File","chown",2,2,"2","2",2,2,"2","2"},
+  {"File","chunk",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","chunk_while",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","close",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","close_on_exec=",1,1,"1","1",1,1,"1","1"},
+  {"File","close_on_exec?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","close_read",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","close_write",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","closed?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","collect",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","collect_concat",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","compact",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","count",0,1,NULL,"1",0,1,NULL,"1"},
+  {"File","ctime",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","cycle",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"File","detect",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"File","drop",1,1,"1","1",1,1,"1","1"},
+  {"File","drop_while",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","each",-1,-1,NULL,NULL,0,2,NULL,"0..2"},
+  {"File","each_byte",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","each_char",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","each_codepoint",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","each_cons",1,1,"1","1",1,1,"1","1"},
+  {"File","each_entry",-1,-1,NULL,NULL,0,2,NULL,"0..2"},
+  {"File","each_line",-1,-1,NULL,NULL,0,2,NULL,"0..2"},
+  {"File","each_slice",1,1,"1","1",1,1,"1","1"},
+  {"File","each_with_index",-1,-1,NULL,NULL,0,2,NULL,"0..2"},
+  {"File","each_with_object",1,1,"1","1",1,1,"1","1"},
+  {"File","entries",0,2,NULL,"0..2",0,2,NULL,"0..2"},
+  {"File","eof",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","eof?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","external_encoding",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","fdatasync",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","fileno",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","filter",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","filter_map",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","find",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"File","find_all",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","find_index",0,1,NULL,"1",0,1,NULL,"1"},
+  {"File","first",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"File","flat_map",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","flock",1,1,"1","1",1,1,"1","1"},
+  {"File","flush",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","fsync",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","getbyte",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","getc",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","grep",1,1,"1","1",1,1,"1","1"},
+  {"File","grep_v",1,1,"1","1",1,1,"1","1"},
+  {"File","group_by",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","include?",1,1,"1","1",1,1,"1","1"},
+  {"File","inject",1,2,"1..2","1..2",0,2,NULL,"0..2"},
+  {"File","internal_encoding",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","isatty",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","lazy",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","lineno",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","lineno=",1,1,"1","1",1,1,"1","1"},
+  {"File","lstat",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","map",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","max",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"File","max_by",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"File","member?",1,1,"1","1",1,1,"1","1"},
+  {"File","min",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"File","min_by",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"File","minmax",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","minmax_by",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","mtime",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","none?",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"File","one?",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"File","partition",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","path",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","pathconf",1,1,"1","1",1,1,"1","1"},
+  {"File","pid",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","pos",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","pos=",1,1,"1","1",1,1,"1","1"},
+  {"File","putc",1,1,"1","1",1,1,"1","1"},
+  {"File","read",0,2,NULL,"0..2",0,2,NULL,"0..2"},
+  {"File","readbyte",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","readchar",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","readlines",0,2,NULL,"0..2",0,2,NULL,"0..2"},
+  {"File","reduce",1,2,"1..2","1..2",0,2,NULL,"0..2"},
+  {"File","reject",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","reopen",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"File","reverse_each",-1,-1,NULL,NULL,0,2,NULL,"0..2"},
+  {"File","rewind",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","seek",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"File","select",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","set_encoding",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"File","size",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","slice_after",1,1,"1","1",-1,-1,NULL,NULL},
+  {"File","slice_before",1,1,"1","1",0,0,NULL,"0"},
+  {"File","slice_when",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","sort",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","sort_by",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","stat",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","sum",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"File","sync",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","sync=",1,1,"1","1",1,1,"1","1"},
+  {"File","take",1,1,"1","1",1,1,"1","1"},
+  {"File","take_while",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","tally",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"File","tell",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","timeout",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","timeout=",1,1,"1","1",1,1,"1","1"},
+  {"File","to_a",0,2,NULL,"0..2",0,2,NULL,"0..2"},
+  {"File","to_h",0,2,NULL,"0..2",0,2,NULL,"0..2"},
+  {"File","to_i",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","to_io",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","to_path",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","truncate",1,1,"1","1",1,1,"1","1"},
+  {"File","tty?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","ungetbyte",1,1,"1","1",1,1,"1","1"},
+  {"File","ungetc",1,1,"1","1",1,1,"1","1"},
+  {"File","uniq",0,0,NULL,"0",0,0,NULL,"0"},
+  {"File","wait_priority",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"File","wait_readable",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"File","wait_writable",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Dir","all?",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Dir","any?",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Dir","chdir",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","children",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","chunk",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","chunk_while",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","close",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","collect",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","collect_concat",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","compact",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","count",0,1,NULL,"1",0,1,NULL,"1"},
+  {"Dir","cycle",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Dir","detect",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Dir","drop",1,1,"1","1",1,1,"1","1"},
+  {"Dir","drop_while",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","each",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","each_child",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","each_cons",1,1,"1","1",1,1,"1","1"},
+  {"Dir","each_entry",-1,-1,NULL,NULL,0,0,NULL,"0"},
+  {"Dir","each_slice",1,1,"1","1",1,1,"1","1"},
+  {"Dir","each_with_index",-1,-1,NULL,NULL,0,0,NULL,"0"},
+  {"Dir","each_with_object",1,1,"1","1",1,1,"1","1"},
+  {"Dir","entries",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","fileno",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","filter",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","filter_map",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","find",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Dir","find_all",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","find_index",0,1,NULL,"1",0,1,NULL,"1"},
+  {"Dir","first",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Dir","flat_map",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","grep",1,1,"1","1",1,1,"1","1"},
+  {"Dir","grep_v",1,1,"1","1",1,1,"1","1"},
+  {"Dir","group_by",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","include?",1,1,"1","1",1,1,"1","1"},
+  {"Dir","inject",1,2,"1..2","1..2",0,2,NULL,"0..2"},
+  {"Dir","inspect",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","lazy",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","map",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","max",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Dir","max_by",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Dir","member?",1,1,"1","1",1,1,"1","1"},
+  {"Dir","min",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Dir","min_by",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Dir","minmax",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","minmax_by",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","none?",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Dir","one?",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Dir","partition",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","path",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","pos",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","pos=",1,1,"1","1",1,1,"1","1"},
+  {"Dir","read",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","reduce",1,2,"1..2","1..2",0,2,NULL,"0..2"},
+  {"Dir","reject",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","reverse_each",-1,-1,NULL,NULL,0,0,NULL,"0"},
+  {"Dir","rewind",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","seek",1,1,"1","1",1,1,"1","1"},
+  {"Dir","select",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","slice_after",1,1,"1","1",-1,-1,NULL,NULL},
+  {"Dir","slice_before",1,1,"1","1",0,0,NULL,"0"},
+  {"Dir","slice_when",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","sort",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","sort_by",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","sum",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Dir","take",1,1,"1","1",1,1,"1","1"},
+  {"Dir","take_while",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","tally",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Dir","tell",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","to_a",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","to_h",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","to_path",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Dir","uniq",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Exception","backtrace",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Exception","backtrace_locations",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Exception","cause",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Exception","detailed_message",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Exception","exception",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Exception","full_message",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Exception","message",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Exception","set_backtrace",1,1,"1","1",1,1,"1","1"},
+  {"Enumerator","+",1,1,"1","1",1,1,"1","1"},
+  {"Enumerator","all?",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Enumerator","any?",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Enumerator","chunk",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","chunk_while",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","collect",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","collect_concat",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","compact",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","count",0,1,NULL,"1",0,1,NULL,"1"},
+  {"Enumerator","cycle",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Enumerator","detect",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Enumerator","drop",1,1,"1","1",1,1,"1","1"},
+  {"Enumerator","drop_while",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","each_cons",1,1,"1","1",1,1,"1","1"},
+  {"Enumerator","each_slice",1,1,"1","1",1,1,"1","1"},
+  {"Enumerator","each_with_index",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","each_with_object",1,1,"1","1",1,1,"1","1"},
+  {"Enumerator","feed",1,1,"1","1",1,1,"1","1"},
+  {"Enumerator","filter",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","filter_map",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","find",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Enumerator","find_all",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","find_index",0,1,NULL,"1",0,1,NULL,"1"},
+  {"Enumerator","first",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Enumerator","flat_map",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","grep",1,1,"1","1",1,1,"1","1"},
+  {"Enumerator","grep_v",1,1,"1","1",1,1,"1","1"},
+  {"Enumerator","group_by",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","include?",1,1,"1","1",1,1,"1","1"},
+  {"Enumerator","inject",1,2,"1..2","1..2",0,2,NULL,"0..2"},
+  {"Enumerator","inspect",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","lazy",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","map",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","max",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Enumerator","max_by",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Enumerator","member?",1,1,"1","1",1,1,"1","1"},
+  {"Enumerator","min",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Enumerator","min_by",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Enumerator","minmax",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","minmax_by",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","next",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","next_values",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","none?",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Enumerator","one?",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Enumerator","partition",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","peek",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","peek_values",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","reduce",1,2,"1..2","1..2",0,2,NULL,"0..2"},
+  {"Enumerator","reject",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","rewind",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","select",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","size",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","slice_after",1,1,"1","1",-1,-1,NULL,NULL},
+  {"Enumerator","slice_before",1,1,"1","1",0,0,NULL,"0"},
+  {"Enumerator","slice_when",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","sort",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","sort_by",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","sum",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Enumerator","take",1,1,"1","1",1,1,"1","1"},
+  {"Enumerator","take_while",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","tally",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Enumerator","uniq",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Enumerator","with_index",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Enumerator","with_object",1,1,"1","1",1,1,"1","1"},
+  {"Enumerator","each",-1,-1,NULL,NULL,-1,-1,NULL,NULL},
+  {"Enumerator","to_a",-1,-1,NULL,NULL,-1,-1,NULL,NULL},
+  {"Enumerator","entries",-1,-1,NULL,NULL,-1,-1,NULL,NULL},
+  {"Enumerator","to_h",-1,-1,NULL,NULL,-1,-1,NULL,NULL},
+  {"Enumerator","each_entry",-1,-1,NULL,NULL,-1,-1,NULL,NULL},
+  {"Enumerator","reverse_each",-1,-1,NULL,NULL,-1,-1,NULL,NULL},
+  {"Random","==",1,1,"1","1",1,1,"1","1"},
+  {"Random","bytes",1,1,"1","1",1,1,"1","1"},
+  {"Random","rand",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Random","random_number",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Random","seed",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","[]",1,1,"1","1",1,1,"1","1"},
+  {"Struct","[]=",2,2,"2","2",2,2,"2","2"},
+  {"Struct","all?",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Struct","any?",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Struct","chunk",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","chunk_while",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","collect",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","collect_concat",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","compact",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","count",0,1,NULL,"1",0,1,NULL,"1"},
+  {"Struct","cycle",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Struct","deconstruct",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","deconstruct_keys",1,1,"1","1",1,1,"1","1"},
+  {"Struct","detect",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Struct","dig",1,-1,"1+",NULL,1,-1,"1+",NULL},
+  {"Struct","drop",1,1,"1","1",1,1,"1","1"},
+  {"Struct","drop_while",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","each",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","each_cons",1,1,"1","1",1,1,"1","1"},
+  {"Struct","each_entry",-1,-1,NULL,NULL,0,0,NULL,"0"},
+  {"Struct","each_pair",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","each_slice",1,1,"1","1",1,1,"1","1"},
+  {"Struct","each_with_index",-1,-1,NULL,NULL,0,0,NULL,"0"},
+  {"Struct","each_with_object",1,1,"1","1",1,1,"1","1"},
+  {"Struct","entries",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","filter",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","filter_map",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","find",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Struct","find_all",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","find_index",0,1,NULL,"1",0,1,NULL,"1"},
+  {"Struct","first",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Struct","flat_map",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","grep",1,1,"1","1",1,1,"1","1"},
+  {"Struct","grep_v",1,1,"1","1",1,1,"1","1"},
+  {"Struct","group_by",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","include?",1,1,"1","1",1,1,"1","1"},
+  {"Struct","inject",1,2,"1..2","1..2",0,2,NULL,"0..2"},
+  {"Struct","lazy",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","length",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","map",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","max",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Struct","max_by",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Struct","member?",1,1,"1","1",1,1,"1","1"},
+  {"Struct","members",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","min",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Struct","min_by",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Struct","minmax",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","minmax_by",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","none?",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Struct","one?",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Struct","partition",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","reduce",1,2,"1..2","1..2",0,2,NULL,"0..2"},
+  {"Struct","reject",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","reverse_each",-1,-1,NULL,NULL,0,0,NULL,"0"},
+  {"Struct","select",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","size",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","slice_after",1,1,"1","1",-1,-1,NULL,NULL},
+  {"Struct","slice_before",1,1,"1","1",0,0,NULL,"0"},
+  {"Struct","slice_when",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","sort",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","sort_by",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","sum",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Struct","take",1,1,"1","1",1,1,"1","1"},
+  {"Struct","take_while",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","tally",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Struct","to_a",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","to_h",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","uniq",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Struct","values",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Data","deconstruct",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Data","deconstruct_keys",1,1,"1","1",1,1,"1","1"},
+  {"Data","members",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Data","to_h",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Data","with",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Class","<",1,1,"1","1",1,1,"1","1"},
+  {"Class","<=",1,1,"1","1",1,1,"1","1"},
+  {"Class",">",1,1,"1","1",1,1,"1","1"},
+  {"Class",">=",1,1,"1","1",1,1,"1","1"},
+  {"Class","alias_method",2,2,"2","2",2,2,"2","2"},
+  {"Class","allocate",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Class","ancestors",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Class","attached_object",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Class","autoload?",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Class","class_variable_defined?",1,1,"1","1",1,1,"1","1"},
+  {"Class","class_variable_get",1,1,"1","1",1,1,"1","1"},
+  {"Class","class_variable_set",2,2,"2","2",2,2,"2","2"},
+  {"Class","class_variables",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Class","const_defined?",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Class","const_get",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Class","const_missing",1,1,"1","1",1,1,"1","1"},
+  {"Class","const_set",2,2,"2","2",2,2,"2","2"},
+  {"Class","const_source_location",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Class","constants",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Class","define_method",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Class","include",1,-1,"1+",NULL,1,-1,"1+",NULL},
+  {"Class","include?",1,1,"1","1",1,1,"1","1"},
+  {"Class","included_modules",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Class","instance_method",1,1,"1","1",1,1,"1","1"},
+  {"Class","instance_methods",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Class","method_defined?",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Class","name",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Class","prepend",1,-1,"1+",NULL,1,-1,"1+",NULL},
+  {"Class","private_instance_methods",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Class","private_method_defined?",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Class","protected_instance_methods",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Class","protected_method_defined?",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Class","public_instance_method",1,1,"1","1",1,1,"1","1"},
+  {"Class","public_instance_methods",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Class","public_method_defined?",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Class","refinements",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Class","remove_class_variable",1,1,"1","1",1,1,"1","1"},
+  {"Class","set_temporary_name",1,1,"1","1",1,1,"1","1"},
+  {"Class","singleton_class?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Class","subclasses",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Class","superclass",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Class","undefined_instance_methods",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Class","new",-1,-1,NULL,NULL,-1,-1,NULL,NULL},
+  {"Module","<",1,1,"1","1",1,1,"1","1"},
+  {"Module","<=",1,1,"1","1",1,1,"1","1"},
+  {"Module","<=>",1,1,"1","1",1,1,"1","1"},
+  {"Module","==",1,1,"1","1",1,1,"1","1"},
+  {"Module","===",1,1,"1","1",1,1,"1","1"},
+  {"Module",">",1,1,"1","1",1,1,"1","1"},
+  {"Module",">=",1,1,"1","1",1,1,"1","1"},
+  {"Module","alias_method",2,2,"2","2",2,2,"2","2"},
+  {"Module","ancestors",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Module","autoload?",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Module","class_variable_defined?",1,1,"1","1",1,1,"1","1"},
+  {"Module","class_variable_get",1,1,"1","1",1,1,"1","1"},
+  {"Module","class_variable_set",2,2,"2","2",2,2,"2","2"},
+  {"Module","class_variables",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Module","const_defined?",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Module","const_get",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Module","const_missing",1,1,"1","1",1,1,"1","1"},
+  {"Module","const_set",2,2,"2","2",2,2,"2","2"},
+  {"Module","const_source_location",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Module","constants",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Module","define_method",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Module","freeze",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Module","include",1,-1,"1+",NULL,1,-1,"1+",NULL},
+  {"Module","include?",1,1,"1","1",1,1,"1","1"},
+  {"Module","included_modules",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Module","inspect",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Module","instance_method",1,1,"1","1",1,1,"1","1"},
+  {"Module","instance_methods",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Module","method_defined?",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Module","name",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Module","prepend",1,-1,"1+",NULL,1,-1,"1+",NULL},
+  {"Module","private_instance_methods",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Module","private_method_defined?",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Module","protected_instance_methods",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Module","protected_method_defined?",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Module","public_instance_method",1,1,"1","1",1,1,"1","1"},
+  {"Module","public_instance_methods",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Module","public_method_defined?",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Module","refinements",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Module","remove_class_variable",1,1,"1","1",1,1,"1","1"},
+  {"Module","set_temporary_name",1,1,"1","1",1,1,"1","1"},
+  {"Module","singleton_class?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Module","to_s",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Module","undefined_instance_methods",0,0,NULL,"0",0,0,NULL,"0"},
   {NULL, NULL, 0, 0, NULL, NULL, 0, 0, NULL, NULL}
 };
 
 /* Class/module-method positional arity, probed from ruby 4.0.6 the same
-   way as the instance table above (tools/gen_builtin_arity_spec.rb).
-   These are the constructors and module functions whose emitters index
-   argv[] unconditionally (File.open with no arguments was a compile-time
-   SIGSEGV). */
-static const struct { const char *cls; const char *m; int min; int max;
-                      const char *lo_exp; const char *hi_exp;
-                      int blk_min; int blk_max;
-                      const char *blk_lo_exp; const char *blk_hi_exp; }
+   way as the instance table above (tools/gen_builtin_arity_spec.rb): the
+   constructors and module functions whose emitters index argv[]
+   unconditionally (File.open with no arguments was a compile-time
+   SIGSEGV), the surface of the constants a program names bare -- GC,
+   Fiber, Thread, a class Struct.new or Data.define answered, keyed
+   StructClass and DataClass -- and the Kernel functions a bare call
+   reaches. */
+static const SpAritySpec
 sp_builtin_cmeth_arity_spec_tbl[] = {
   {"File","open",1,3,"1..3","1..3",1,3,"1..3","1..3"},
   {"File","new",1,3,"1..3","1..3",1,3,"1..3","1..3"},
@@ -11157,6 +11759,25 @@ sp_builtin_cmeth_arity_spec_tbl[] = {
   {"File","zero?",1,1,"1","1",1,1,"1","1"},
   {"File","identical?",2,2,"2","2",2,2,"2","2"},
   {"File","absolute_path",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"File","file?",1,1,"1","1",1,1,"1","1"},
+  {"File","directory?",1,1,"1","1",1,1,"1","1"},
+  {"File","readable?",1,1,"1","1",1,1,"1","1"},
+  {"File","writable?",1,1,"1","1",1,1,"1","1"},
+  {"File","executable?",1,1,"1","1",1,1,"1","1"},
+  {"File","symlink?",1,1,"1","1",1,1,"1","1"},
+  {"File","size?",1,1,"1","1",1,1,"1","1"},
+  {"File","fnmatch",2,3,"2..3","2..3",2,3,"2..3","2..3"},
+  {"File","fnmatch?",2,3,"2..3","2..3",2,3,"2..3","2..3"},
+  {"File","owned?",1,1,"1","1",1,1,"1","1"},
+  {"File","world_readable?",1,1,"1","1",1,1,"1","1"},
+  {"File","world_writable?",1,1,"1","1",1,1,"1","1"},
+  {"File","path",1,1,"1","1",1,1,"1","1"},
+  {"File","absolute_path?",1,1,"1","1",1,1,"1","1"},
+  {"File","birthtime",1,1,"1","1",1,1,"1","1"},
+  {"File","chown",2,-1,"2+",NULL,2,-1,"2+",NULL},
+  {"File","lchmod",1,-1,"1+",NULL,1,-1,"1+",NULL},
+  {"File","lchown",2,-1,"2+",NULL,2,-1,"2+",NULL},
+  {"File","mkfifo",1,2,"1..2","1..2",1,2,"1..2","1..2"},
   {"IO","for_fd",1,2,"1..2","1..2",1,2,"1..2","1..2"},
   {"IO","sysopen",1,3,"1..3","1..3",1,3,"1..3","1..3"},
   {"IO","new",1,2,"1..2","1..2",1,2,"1..2","1..2"},
@@ -11224,8 +11845,6 @@ sp_builtin_cmeth_arity_spec_tbl[] = {
   {"Process","setpriority",3,3,"3","3",3,3,"3","3"},
   {"Process","getsid",0,1,NULL,"0..1",0,1,NULL,"0..1"},
   {"Process","kill",2,-1,"2+",NULL,2,-1,"2+",NULL},
-  {"Process","spawn",1,-1,"1+",NULL,1,-1,"1+",NULL},
-  {"Process","waitpid2",1,1,"1","1",1,1,"1","1"},
   {"Process","clock_gettime",1,2,"1..2","1..2",1,2,"1..2","1..2"},
   {"Process","clock_getres",1,2,"1..2","1..2",1,2,"1..2","1..2"},
   {"Process","pid",0,0,NULL,"0",0,0,NULL,"0"},
@@ -11235,6 +11854,9 @@ sp_builtin_cmeth_arity_spec_tbl[] = {
   {"Process","euid",0,0,NULL,"0",0,0,NULL,"0"},
   {"Process","egid",0,0,NULL,"0",0,0,NULL,"0"},
   {"Process","setproctitle",1,1,"1","1",1,1,"1","1"},
+  {"Process","times",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Process","spawn",1,-1,"1+",NULL,1,-1,"1+",NULL},
+  {"Process","waitpid2",0,2,NULL,"0..2",0,2,NULL,"0..2"},
   {"Regexp","new",1,2,"1..2","1..2",1,2,"1..2","1..2"},
   {"Regexp","escape",1,1,"1","1",1,1,"1","1"},
   {"Regexp","quote",1,1,"1","1",1,1,"1","1"},
@@ -11255,6 +11877,35 @@ sp_builtin_cmeth_arity_spec_tbl[] = {
   {"Kernel","Hash",1,1,"1","1",1,1,"1","1"},
   {"Kernel","Rational",1,2,"1..2","1..2",1,2,"1..2","1..2"},
   {"Kernel","Complex",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Kernel","throw",1,2,"1..2","1..2",1,2,"1..2","1..2"},
+  {"Kernel","catch",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Kernel","raise",0,3,NULL,"0..3",0,3,NULL,"0..3"},
+  {"Kernel","rand",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Kernel","srand",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Kernel","caller",0,2,NULL,"0..2",0,2,NULL,"0..2"},
+  {"Kernel","lambda",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Kernel","proc",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Kernel","binding",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Kernel","block_given?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"GC","start",0,0,NULL,"0",0,0,NULL,"0"},
+  {"GC","stat",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"GC","compact",0,0,NULL,"0",0,0,NULL,"0"},
+  {"GC","count",0,0,NULL,"0",0,0,NULL,"0"},
+  {"GC","disable",0,0,NULL,"0",0,0,NULL,"0"},
+  {"GC","enable",0,0,NULL,"0",0,0,NULL,"0"},
+  {"GC","stress",0,0,NULL,"0",0,0,NULL,"0"},
+  {"GC","latest_gc_info",0,1,NULL,"0..1",0,1,NULL,"0..1"},
+  {"Fiber","current",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","current",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","main",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","list",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","pass",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","abort_on_exception",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","report_on_exception",0,0,NULL,"0",0,0,NULL,"0"},
+  {"Thread","handle_interrupt",1,1,"1","1",1,1,"1","1"},
+  {"StructClass","members",0,0,NULL,"0",0,0,NULL,"0"},
+  {"StructClass","keyword_init?",0,0,NULL,"0",0,0,NULL,"0"},
+  {"DataClass","members",0,0,NULL,"0",0,0,NULL,"0"},
   {"Marshal","dump",1,3,"1..3","1..3",1,3,"1..3","1..3"},
   {"Marshal","load",1,2,"1..2","1..2",1,2,"1..2","1..2"},
   {"Signal","signame",1,1,"1","1",1,1,"1","1"},
@@ -11316,11 +11967,153 @@ sp_builtin_cmeth_arity_spec_tbl[] = {
   {"Pathname","pwd",0,0,NULL,"0",0,0,NULL,"0"},
   {NULL, NULL, 0, 0, NULL, NULL, 0, 0, NULL, NULL}
 };
-int emit_builtin_arity_guard(Compiler *c, int id, Buf *b) {
+/* The row of one spec table for (cls, name), read for the bare or the
+   block-carrying call. Answers whether the table has the row; exp receives
+   CRuby's wording when argc falls outside the accepted counts. */
+static int arity_spec_row(const SpAritySpec *tbl, const char *cls, const char *name,
+                          int with_block, int argc, char *exp, size_t n) {
+  for (int i = 0; tbl[i].cls; i++) {
+    if (!sp_streq(tbl[i].cls, cls) || !sp_streq(tbl[i].m, name)) continue;
+    int mn = with_block ? tbl[i].blk_min : tbl[i].min;
+    int mx = with_block ? tbl[i].blk_max : tbl[i].max;
+    const char *lo = with_block ? tbl[i].blk_lo_exp : tbl[i].lo_exp;
+    const char *hi = with_block ? tbl[i].blk_hi_exp : tbl[i].hi_exp;
+    if (mn >= 0 && argc < mn && lo) snprintf(exp, n, "%s", lo);
+    else if (mx >= 0 && argc > mx && hi) snprintf(exp, n, "%s", hi);
+    return 1;
+  }
+  return 0;
+}
+
+/* Whether a reopened builtin -- Object, Kernel, Class, Module, the
+   receiver's own or the other class its kind stands for -- defines the
+   name: a def there keeps its dispatch, whatever the count. */
+static int reopened_owns(Compiler *c, const char *cls, const char *name) {
+  int bc = comp_class_index(c, cls);
+  return bc >= 0 && comp_method_in_chain(c, bc, name, NULL) >= 0;
+}
+
+/* The singleton defs a program writes on a constant -- `def S1.m`, or a
+   def or define_method under `class << S1` or `class << self` in its body,
+   through statement lists, branches, loops and blocks -- read off the tree
+   once per table, with the `extend self` a body may carry (only the module
+   arm reads that). A class Struct.new or Data.define answered is not yet a
+   class when they are collected, so they reach no chain, and a def under a
+   conditional in a singleton body reaches none either; the constant arm
+   asks here. */
+typedef struct { char *cn; char *name; } SingletonDef;
+static SingletonDef *g_sdefs;
+static int g_nsdefs, g_csdefs;
+static const NodeTable *g_sdefs_nt;
+static int g_sdefs_count;
+static unsigned g_sdefs_version;
+static void sdefs_add(const char *cn, const char *name) {
+  if (g_nsdefs >= g_csdefs) {
+    int cap = g_csdefs ? g_csdefs * 2 : 16;
+    SingletonDef *grown = realloc(g_sdefs, sizeof *grown * (size_t)cap);
+    if (!grown) return;
+    g_sdefs = grown; g_csdefs = cap;
+  }
+  g_sdefs[g_nsdefs].cn = strdup(cn); g_sdefs[g_nsdefs].name = strdup(name); g_nsdefs++;
+}
+static void sdefs_scan(const NodeTable *nt, int id, const char *cn, int in_singleton) {
+  const char *ty = id >= 0 ? nt_type(nt, id) : NULL;
+  if (!ty) return;
+  if (sp_streq(ty, "DefNode")) {
+    /* a def with a receiver of its own is that receiver's (the pass below
+       reads those off every DefNode) */
+    const char *dn = nt_str(nt, id, "name");
+    if (in_singleton && cn && dn && nt_ref(nt, id, "receiver") < 0) sdefs_add(cn, dn);
+  }
+  else if (sp_streq(ty, "SingletonClassNode")) {
+    /* `class << Const` is entered from the pass over every node; `class <<
+       self` from its class's body -- and a singleton's own singleton is not
+       the class's */
+    int ex = nt_ref(nt, id, "expression");
+    const char *ety = ex >= 0 ? nt_type(nt, ex) : NULL;
+    const char *scn = ety && sp_streq(ety, "ConstantReadNode") && !cn ? nt_str(nt, ex, "name")
+                    : ety && sp_streq(ety, "SelfNode") && cn && !in_singleton ? cn : NULL;
+    if (scn) sdefs_scan(nt, nt_ref(nt, id, "body"), scn, 1);
+  }
+  else if (sp_streq(ty, "CallNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    int an = nt_ref(nt, id, "arguments"); int n = 0;
+    const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &n) : NULL;
+    const char *a0 = av && n == 1 ? nt_type(nt, av[0]) : NULL;
+    if (nm && a0 && nt_ref(nt, id, "receiver") < 0) {
+      if (!in_singleton && cn && sp_streq(nm, "extend") && sp_streq(a0, "SelfNode"))
+        sdefs_add(cn, "extend self");
+      /* define_method(:m) { } in a singleton body is the class's own too */
+      const char *dm = sp_streq(a0, "SymbolNode") ? nt_str(nt, av[0], "value") : NULL;
+      if (in_singleton && cn && dm && sp_streq(nm, "define_method")) sdefs_add(cn, dm);
+    }
+    sdefs_scan(nt, nt_ref(nt, id, "block"), cn, in_singleton);   /* `[1].each do def m` */
+  }
+  else if (sp_streq(ty, "StatementsNode")) {
+    int n = 0; const int *st = nt_arr(nt, id, "body", &n);
+    for (int i = 0; i < n; i++) sdefs_scan(nt, st[i], cn, in_singleton);
+  }
+  else if (sp_streq(ty, "BlockNode")) sdefs_scan(nt, nt_ref(nt, id, "body"), cn, in_singleton);
+  else if (sp_streq(ty, "IfNode") || sp_streq(ty, "UnlessNode") || sp_streq(ty, "ElseNode") ||
+           sp_streq(ty, "WhenNode") || sp_streq(ty, "InNode") || sp_streq(ty, "RescueNode") ||
+           sp_streq(ty, "EnsureNode") || sp_streq(ty, "BeginNode") || sp_streq(ty, "CaseNode") ||
+           sp_streq(ty, "CaseMatchNode") || sp_streq(ty, "WhileNode") ||
+           sp_streq(ty, "UntilNode") || sp_streq(ty, "ForNode")) {
+    static const char *const KEYS[] = { "statements", "subsequent", "else_clause",
+                                        "rescue_clause", "ensure_clause" };
+    for (size_t k = 0; k < sizeof KEYS / sizeof KEYS[0]; k++)
+      sdefs_scan(nt, nt_ref(nt, id, KEYS[k]), cn, in_singleton);
+    int n = 0; const int *cs = nt_arr(nt, id, "conditions", &n);
+    for (int i = 0; i < n; i++) sdefs_scan(nt, cs[i], cn, in_singleton);
+  }
+  /* a class, module or def of its own is another scope */
+}
+static int singleton_def_of(Compiler *c, const char *cn, const char *name) {
+  const NodeTable *nt = c->nt;
+  /* the version as well as the count: a rename pass rewrites a name in
+     place without growing the table */
+  if (g_sdefs_nt != nt || g_sdefs_count != nt->count || g_sdefs_version != nt->version) {
+    for (int i = 0; i < g_nsdefs; i++) { free(g_sdefs[i].cn); free(g_sdefs[i].name); }
+    g_nsdefs = 0; g_sdefs_nt = nt; g_sdefs_count = nt->count; g_sdefs_version = nt->version;
+    for (int id = 0; id < nt->count; id++) {
+      const char *ty = nt_type(nt, id);
+      if (!ty) continue;
+      if (sp_streq(ty, "DefNode")) {
+        int dr = nt_ref(nt, id, "receiver");
+        const char *rty = dr >= 0 ? nt_type(nt, dr) : NULL;
+        const char *rn = rty && sp_streq(rty, "ConstantReadNode") ? nt_str(nt, dr, "name") : NULL;
+        const char *dn = nt_str(nt, id, "name");
+        if (rn && dn) sdefs_add(rn, dn);
+      }
+      else if (sp_streq(ty, "ClassNode") || sp_streq(ty, "ModuleNode")) {
+        int cp = nt_ref(nt, id, "constant_path");
+        const char *cty = cp >= 0 ? nt_type(nt, cp) : NULL;
+        const char *kn = cty && sp_streq(cty, "ConstantReadNode") ? nt_str(nt, cp, "name") : NULL;
+        if (kn) sdefs_scan(nt, nt_ref(nt, id, "body"), kn, 0);
+      }
+      else if (sp_streq(ty, "SingletonClassNode")) sdefs_scan(nt, id, NULL, 0);
+    }
+  }
+  for (int i = 0; i < g_nsdefs; i++)
+    if (sp_streq(g_sdefs[i].cn, cn) && sp_streq(g_sdefs[i].name, name)) return 1;
+  return 0;
+}
+
+/* A top-level def or alias: Object's private instance method, which CRuby
+   refuses on any receiver as a NoMethodError, never as a count. */
+static int toplevel_def(Compiler *c, const char *name) {
+  int mi = comp_method_index(c, name);
+  return mi >= 0 && !c->scopes[mi].is_cmethod;
+}
+
+/* The guard's decision: a builtin call whose positional count CRuby rejects.
+   exp receives CRuby's wording of the accepted range, eval_recv whether the
+   receiver is an expression to evaluate before the raise. */
+static int arity_violation(Compiler *c, int id, char *exp, size_t n, int *eval_recv) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
   int recv = nt_ref(nt, id, "receiver");
-  if (!name || recv < 0) return 0;
+  if (!name) return 0;
   /* nil&.m short-circuits before any arity check */
   const char *safe_op = nt_str(nt, id, "call_operator");
   if (safe_op && sp_streq(safe_op, "&.")) return 0;
@@ -11346,34 +12139,66 @@ int emit_builtin_arity_guard(Compiler *c, int id, Buf *b) {
                sp_streq(at, "BlockArgumentNode")))
       return 0;
   }
-  char exp[32]; exp[0] = 0;
-  int eval_recv = 1;
-  const char *rty2 = nt_type(nt, recv);
-  if (rty2 && sp_streq(rty2, "ConstantReadNode")) {
+  exp[0] = 0;
+  *eval_recv = 1;
+  const SpAritySpec *itbl = sp_builtin_arity_spec_tbl;
+  const SpAritySpec *ctbl = sp_builtin_cmeth_arity_spec_tbl;
+  const char *rty2 = recv >= 0 ? nt_type(nt, recv) : NULL;
+  if (recv < 0) {
+    /* A bare call resolves to the enclosing class's chain, then to a
+       top-level def or a reopened Kernel or Object, and only then to the
+       Kernel function, whose rows sit with the class methods; a def keeps
+       its dispatch (the plain ones went to emit_method_call above this
+       guard already). */
+    Scope *esc = comp_scope_of(c, id);
+    int ecls = esc ? esc->class_id : -1;
+    if (ecls >= 0 && ecls < c->nclasses &&
+        (esc->is_cmethod ? comp_cmethod_in_chain(c, ecls, name, NULL) >= 0
+                         : comp_method_in_chain(c, ecls, name, NULL) >= 0 ||
+                           comp_reader_in_chain(c, ecls, name, NULL)))
+      return 0;
+    if (comp_method_index(c, name) >= 0 ||
+        reopened_owns(c, "Kernel", name) || reopened_owns(c, "Object", name)) return 0;
+    if (!arity_spec_row(ctbl, "Kernel", name, with_block, argc, exp, n) || !exp[0]) return 0;
+    *eval_recv = 0;
+  }
+  else if (rty2 && sp_streq(rty2, "ConstantReadNode")) {
     const char *cn = nt_str(nt, recv, "name");
     if (!cn) return 0;
     /* the analyzer renames Hash.new-with-default; the spec row is "new" */
     if (sp_streq(name, "__hash_new_default")) name = "new";
-    /* a user class by this name owns its own methods */
+    /* a user class owns the class methods it defines, and a module that
+       extends itself its instance methods too; the rest of its surface is
+       Class's or Module's own (name, superclass, ancestors) with Object's
+       beneath, or the readers a class Struct.new or Data.define answered
+       carries */
+    const char *surface = NULL;   /* the instance rows a class object answers with */
     int uc = comp_class_index(c, cn);
-    if (uc >= 0 && !c->classes[uc].is_native_class) return 0;
-    for (int i = 0; sp_builtin_cmeth_arity_spec_tbl[i].cls; i++) {
-      if (!sp_streq(sp_builtin_cmeth_arity_spec_tbl[i].cls, cn) ||
-          !sp_streq(sp_builtin_cmeth_arity_spec_tbl[i].m, name)) continue;
-      int mn = with_block ? sp_builtin_cmeth_arity_spec_tbl[i].blk_min
-                          : sp_builtin_cmeth_arity_spec_tbl[i].min;
-      int mx = with_block ? sp_builtin_cmeth_arity_spec_tbl[i].blk_max
-                          : sp_builtin_cmeth_arity_spec_tbl[i].max;
-      const char *lo = with_block ? sp_builtin_cmeth_arity_spec_tbl[i].blk_lo_exp
-                                  : sp_builtin_cmeth_arity_spec_tbl[i].lo_exp;
-      const char *hi = with_block ? sp_builtin_cmeth_arity_spec_tbl[i].blk_hi_exp
-                                  : sp_builtin_cmeth_arity_spec_tbl[i].hi_exp;
-      if (mn >= 0 && argc < mn && lo) snprintf(exp, sizeof exp, "%s", lo);
-      else if (mx >= 0 && argc > mx && hi) snprintf(exp, sizeof exp, "%s", hi);
-      break;
+    if (uc >= 0 && !c->classes[uc].is_native_class) {
+      int mod = comp_class_is_module(c, &c->classes[uc]);
+      /* a `class << self` reader is the class object's own and sits in no
+         chain; a writer's name has no row to meet */
+      if (comp_cmethod_in_chain(c, uc, name, NULL) >= 0 ||
+          comp_is_sg_reader(&c->classes[uc], name) || singleton_def_of(c, cn, name) ||
+          (mod && singleton_def_of(c, cn, "extend self") &&
+           (comp_method_in_chain(c, uc, name, NULL) >= 0 ||
+            comp_reader_in_chain(c, uc, name, NULL))))
+        return 0;
+      if (c->classes[uc].is_struct) cn = "StructClass";
+      else if (c->classes[uc].is_data) cn = "DataClass";
+      else surface = mod ? "Module" : "Class";
     }
+    if (surface) {
+      if (reopened_owns(c, surface, name) ||
+          (sp_streq(surface, "Class") && reopened_owns(c, "Module", name)) ||
+          reopened_owns(c, "Object", name) || reopened_owns(c, "Kernel", name)) return 0;
+      if (!arity_spec_row(itbl, surface, name, with_block, argc, exp, n) &&
+          (!arity_spec_row(itbl, "Object", name, with_block, argc, exp, n) || toplevel_def(c, name)))
+        return 0;
+    }
+    else if (!arity_spec_row(ctbl, cn, name, with_block, argc, exp, n)) return 0;
     if (!exp[0]) return 0;
-    eval_recv = 0;  /* a constant read has no effect to evaluate */
+    *eval_recv = 0;  /* a constant read has no effect to evaluate */
   }
   else {
     TyKind rt = comp_ntype(c, recv);
@@ -11386,40 +12211,65 @@ int emit_builtin_arity_guard(Compiler *c, int id, Buf *b) {
                     : rt == TY_BOOL ? "TrueClass"  /* FalseClass: same surface */
                     : rt == TY_RATIONAL ? "Rational" : rt == TY_COMPLEX ? "Complex"
                     : rt == TY_MUTEX ? "Mutex"
+                    : rt == TY_REGEX ? "Regexp" : rt == TY_MATCHDATA ? "MatchData"
+                    : rt == TY_PROC ? "Proc" : rt == TY_METHOD ? "Method"
+                    : rt == TY_FIBER ? "Fiber" : rt == TY_THREAD ? "Thread"
+                    : rt == TY_QUEUE ? "Queue"  /* SizedQueue too: the rows they share */
+                    : rt == TY_CONDVAR ? "ConditionVariable"
+                    : rt == TY_IO ? "File" : rt == TY_DIR ? "Dir"
+                    : rt == TY_EXCEPTION ? "Exception"
+                    : rt == TY_ENUMERATOR ? "Enumerator" : rt == TY_RANDOM ? "Random"
                     : ty_is_array(rt) ? "Array" : ty_is_hash(rt) ? "Hash" : NULL;
     /* a native (package-backed) receiver checks its own class's rows -- the
        loose C dispatch dropped excess arguments (StringIO#eof?(1) answered
-       false); a user object falls back to Object's universal rows. Both only
-       for a method the user's own chain does not define. */
+       false); a Struct or Data instance its kind's; a user object falls back
+       to Object's universal rows. All only for a method the user's own chain
+       does not define. */
     if (!bcn && ty_is_object(rt)) {
       int ocid = ty_object_class(rt);
       if (ocid >= 0 && ocid < c->nclasses &&
           comp_method_in_chain(c, ocid, name, NULL) < 0 &&
           !comp_reader_in_chain(c, ocid, name, NULL) &&
           !comp_writer_in_chain(c, ocid, name, NULL))
-        bcn = c->classes[ocid].is_native_class ? c->classes[ocid].name : "Object";
+        bcn = c->classes[ocid].is_native_class ? c->classes[ocid].name
+            : c->classes[ocid].is_struct ? "Struct"
+            : c->classes[ocid].is_data ? "Data" : "Object";
     }
     if (!bcn) return 0;
-    for (int i = 0; sp_builtin_arity_spec_tbl[i].cls; i++) {
-      if (!sp_streq(sp_builtin_arity_spec_tbl[i].cls, bcn) ||
-          !sp_streq(sp_builtin_arity_spec_tbl[i].m, name)) continue;
-      int mn = with_block ? sp_builtin_arity_spec_tbl[i].blk_min
-                          : sp_builtin_arity_spec_tbl[i].min;
-      int mx = with_block ? sp_builtin_arity_spec_tbl[i].blk_max
-                          : sp_builtin_arity_spec_tbl[i].max;
-      const char *lo = with_block ? sp_builtin_arity_spec_tbl[i].blk_lo_exp
-                                  : sp_builtin_arity_spec_tbl[i].lo_exp;
-      const char *hi = with_block ? sp_builtin_arity_spec_tbl[i].blk_hi_exp
-                                  : sp_builtin_arity_spec_tbl[i].hi_exp;
-      if (mn >= 0 && argc < mn && lo) snprintf(exp, sizeof exp, "%s", lo);
-      else if (mx >= 0 && argc > mx && hi) snprintf(exp, sizeof exp, "%s", hi);
-      break;
+    /* a name the class inherits from Object unchanged has Object's row: the
+       table keeps a class's own row only where the class defines the name,
+       and a forwarding name keeps one that never fires */
+    const char *owner = bcn;
+    if (!arity_spec_row(itbl, bcn, name, with_block, argc, exp, n)) {
+      if (!arity_spec_row(itbl, "Object", name, with_block, argc, exp, n)) return 0;
+      owner = "Object";
     }
     if (!exp[0]) return 0;
-    /* a reopened builtin that defines the name keeps its own dispatch */
-    int bc = comp_class_index(c, bcn);
-    if (bc >= 0 && comp_method_in_chain(c, bc, name, NULL) >= 0) return 0;
+    /* a reopened builtin that defines the name keeps its own dispatch --
+       the receiver's class, the other class its kind stands for, or the
+       Object the row came from; a top-level def is Object's too, private,
+       which CRuby refuses as a NoMethodError, not a count */
+    const char *twin = rt == TY_BOOL ? "FalseClass" : rt == TY_IO ? "IO"
+                     : rt == TY_QUEUE ? "SizedQueue" : NULL;
+    if (reopened_owns(c, bcn, name) || reopened_owns(c, owner, name) ||
+        (twin && reopened_owns(c, twin, name)) ||
+        (sp_streq(owner, "Object") && toplevel_def(c, name))) return 0;
   }
+  return 1;
+}
+
+int builtin_arity_violation(Compiler *c, int id) {
+  char exp[32]; int eval_recv;
+  return arity_violation(c, id, exp, sizeof exp, &eval_recv);
+}
+
+int emit_builtin_arity_guard(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  char exp[32]; int eval_recv;
+  if (!arity_violation(c, id, exp, sizeof exp, &eval_recv)) return 0;
+  int recv = nt_ref(nt, id, "receiver");
+  int anode = nt_ref(nt, id, "arguments");
+  int argc = 0; const int *argv = anode >= 0 ? nt_arr(nt, anode, "arguments", &argc) : NULL;
   TyKind rty = comp_ntype(c, id);
   const char *dv = default_value(rty);
   buf_puts(b, "({ ");

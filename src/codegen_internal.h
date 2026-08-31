@@ -115,6 +115,7 @@ extern int g_yield_block_fallback_nren;
 extern int  g_nren;
 extern int  g_block_id;
 int builtin_method_known(const char *cls, const char *m);
+int builtin_arity_violation(Compiler *c, int id);
 int builtin_object_method_known(const char *m);
 int name_is_enumerable_module_method(const char *m);
 int scope_reads_callee(Compiler *c, int si);

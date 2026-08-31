@@ -1011,7 +1011,21 @@ static int an_bare_call_class_owned(Compiler *c, int id) {
          comp_reader_in_chain(c, cid, name, NULL);
 }
 
+static TyKind infer_call_inner(Compiler *c, int id);
+
+/* A builtin call whose count the arity guard refuses raises before it
+   answers, so any type is sound for it; nil lets the shapes that need one
+   -- a send candidate, which is dropped when it types unknown, an argument
+   -- compile down to the raise instead of a miss. The guard runs after a
+   few arms of emit_call, so none of those may claim a call it refuses, or
+   the value typed here is not the one emitted. */
 TyKind infer_call(Compiler *c, int id) {
+  TyKind t = infer_call_inner(c, id);
+  if (t == TY_UNKNOWN && builtin_arity_violation(c, id)) return TY_NIL;
+  return t;
+}
+
+static TyKind infer_call_inner(Compiler *c, int id) {
 
   /* a yielder push (`y << v` inside an Enumerator.new generator) lowers to a
      Fiber.yield, whose value is boxed -- never the array append it looks like */
