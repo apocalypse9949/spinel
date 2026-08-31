@@ -84,13 +84,20 @@ jobs:
         # independent (tests diff output, not codegen), and the gcc -O1 leg still
         # exercises the optimizing path; the clang leg's job is that clang accepts
         # the emitted C and runs it, which -O0 covers.
-        # The clang legs also bypass sccache (CC override): sccache declines to
-        # cache clang's -include-pch compiles, so wrapping ~2000 compile+link
-        # invocations only adds client-spawn overhead on top of the PCH speedup.
-        # gcc keeps the wrapper -- its PCH rides the implicit .gch lookup, which
-        # sccache's preprocessor hashing doesn't see, so gcc tests get cache hits
-        # AND the PCH fallback.
-        run: make -j$(getconf _NPROCESSORS_ONLN) test ${{ matrix.cc == 'clang' && 'OPT=-O0 CC=clang' || 'OPT=-O1' }}
+        # EVERY leg bypasses sccache here (CC override). The clang reason is
+        # old: sccache declines to cache -include-pch compiles, so the wrapper
+        # was pure client-spawn overhead. The gcc reason is measured, not
+        # assumed: a push that touches a lib/ header invalidates every
+        # per-test cache entry, and sccache's miss path preprocesses the TU,
+        # round-trips the GitHub cache service (a GET and a PUT per file) and
+        # compiles from the PREPROCESSED text, where the implicit .gch cannot
+        # help -- about 210ms of overhead per miss on top of a ~60ms real
+        # compile, times ~3,400 tests: the 5-minute job became 19 minutes
+        # exactly when a runtime header changed (runs 33369245440 and
+        # 33348246194). Unwrapped, cold and warm runs cost the same few
+        # minutes, which is the bound that matters; the compiler build above
+        # keeps the wrapper, where TUs are big and hits pay for themselves.
+        run: make -j$(getconf _NPROCESSORS_ONLN) test ${{ matrix.cc == 'clang' && 'OPT=-O0 CC=clang' || 'OPT=-O1 CC=gcc' }}
 
       # Inference/allocation property gates. These assert the SHAPE of the
       # generated C -- that a slot keeps its typed representation, that the
