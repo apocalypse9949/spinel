@@ -5962,16 +5962,44 @@ else {
       /* IO#write on a poly value when a user class owns the name: a Socket or
          File from Socket.pair/File.open has no user-class arm in the switch,
          but the dispatch was still opened (some other class does define
-         #write), so the builtin tag needs its own case. The runtime's
-         sp_File_write already routes to sp_sock_write when is_sock, so the
-         one entry covers both File and Socket receivers. */
+         #write), so the builtin tag needs its own case. Use the arg's
+         already-materialised temp `_t<atmp[0]>` (re-emitting argv[0] would
+         re-evaluate side effects like `poly_io.write(next_chunk())` and
+         write a different chunk on each call). The String arm sizes the
+         write with sp_str_byte_len so an embedded NUL survives; the poly
+         arm's sp_poly_to_s result may be a marked String or a static SPL()
+         literal, so it uses the strlen-based sp_File_write. */
       if (sp_streq(name, "write") && argc == 1) {
-        Buf wa0; memset(&wa0, 0, sizeof wa0);
-        if (atmp_ty[0] == TY_STRING) emit_str_expr(c, argv[0], &wa0);
-        else { buf_puts(&wa0, "sp_poly_to_s("); emit_boxed(c, argv[0], &wa0); buf_puts(&wa0, ")"); }
-        buf_printf(b, " case SP_BUILTIN_IO: _t%d = sp_File_write((sp_File *)_t%d.v.p, %s); break;",
-                   tr, tv, wa0.p ? wa0.p : "NULL");
-        free(wa0.p);
+        int wrv = ++g_tmp;
+        if (atmp_ty[0] == TY_STRING) {
+          /* sp_File_write_bin sizes the operand with sp_str_byte_len, so an
+             embedded NUL reaches the descriptor; the bare sp_File_write
+             truncates on NUL. */
+          if (ret == TY_POLY)
+            buf_printf(b, " case SP_BUILTIN_IO: { sp_int _t%d = sp_File_write_bin("
+                           "(sp_File *)_t%d.v.p, _t%d); "
+                           "_t%d = sp_box_int(_t%d); break; }",
+                       wrv, tv, atmp[0], tr, wrv);
+          else
+            buf_printf(b, " case SP_BUILTIN_IO: _t%d = sp_File_write_bin("
+                           "(sp_File *)_t%d.v.p, _t%d); break;",
+                       tr, tv, atmp[0]);
+        }
+        else {
+          /* sp_poly_to_s may return a marked String or a static SPL()
+             literal: the strlen-based sp_File_write is the only shared
+             entry that is correct for both shapes. */
+          int wrs = ++g_tmp;
+          if (ret == TY_POLY)
+            buf_printf(b, " case SP_BUILTIN_IO: { const char *_t%d = sp_poly_to_s(_t%d); "
+                           "sp_int _t%d = sp_File_write((sp_File *)_t%d.v.p, _t%d); "
+                           "_t%d = sp_box_int(_t%d); break; }",
+                       wrs, atmp[0], wrv, tv, wrs, tr, wrv);
+          else
+            buf_printf(b, " case SP_BUILTIN_IO: { const char *_t%d = sp_poly_to_s(_t%d); "
+                           "_t%d = sp_File_write((sp_File *)_t%d.v.p, _t%d); break; }",
+                       wrs, atmp[0], tr, tv, wrs);
+        }
       }
       if (is_push) {
         /* The value is a builtin array: append each (boxed) arg via sp_poly_shl,
