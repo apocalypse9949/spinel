@@ -1171,8 +1171,27 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       }
     }
     else {
-      buf_printf(b, "sp_str_split_limit(_t%d.v.s, ", tv); emit_str_expr(c, argv[0], b);
-      buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
+      /* The separator of String#split can be nil ("split on whitespace" in
+         CRuby). sp_str_split_limit treats a NULL separator as the
+         whitespace mode; emit_str_expr's usual nil guard would raise
+         "no implicit conversion of nil into String" before the call,
+         preventing the documented idiom. Evaluate argv[0] for side
+         effects (a method call, an ivar read through a side-effecting
+         accessor) and discard the value, then pass NULL so the
+         runtime's branch is reached. A nil result is rare enough in
+         this slot that a single explicit type check is cheaper than
+         threading nil-tolerance through emit_str_expr. */
+      if (comp_ntype(c, argv[0]) == TY_NIL) {
+        int tsep = ++g_tmp;
+        buf_printf(b, "({ sp_RbVal _t%d = ", tsep); emit_boxed(c, argv[0], b);
+        buf_printf(b, "; (void)_t%d; sp_str_split_limit(_t%d.v.s, NULL, ",
+                   tsep, tv);
+        emit_int_expr(c, argv[1], b); buf_puts(b, "); })");
+      }
+      else {
+        buf_printf(b, "sp_str_split_limit(_t%d.v.s, ", tv); emit_str_expr(c, argv[0], b);
+        buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
+      }
     }
     buf_printf(b, " : (sp_StrArray *)(sp_raise_nomethod(sp_nomethod_msg(\"split\", _t%d)), (void *)0); })", tv);
     return 1;
