@@ -9626,6 +9626,21 @@ else {
         buf_puts(b, ";\n");
       }
     }
+    /* No slot for the value -- the iterator discards what the block answers
+       (`each`), so nothing reads it. The EXPRESSION still runs: `next
+       found.push(1)` pushes and then leaves the iteration, and dropping it
+       here emitted a bare `continue` that ran neither. Same shape as the
+       proc-body path above, which has said `(void)(...)` since it was
+       written; a literal needs no evaluating (#4235). */
+    else {
+      int nargs2 = nt_ref(nt, id, "arguments");
+      int nvc2 = 0; const int *nv2 = nargs2 >= 0 ? nt_arr(nt, nargs2, "arguments", &nvc2) : NULL;
+      for (int a = 0; a < nvc2; a++) {
+        if (node_is_pure_literal(nt, nv2[a])) continue;
+        emit_indent(b, indent);
+        buf_puts(b, "(void)("); emit_expr(c, nv2[a], b); buf_puts(b, ");\n");
+      }
+    }
     /* `next` crossing begin..ensure regions opened INSIDE this loop must run
        their ensure bodies (CRuby). Defer through the innermost ensure label
        with the next flag; the ensure tail chains outward and finally emits
