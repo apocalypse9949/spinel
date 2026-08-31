@@ -10207,6 +10207,12 @@ typedef struct { sp_Proc *outer; sp_Proc *inner; } sp_ProcCompose;
 static void sp_proc_compose_scan(void *p) { sp_gc_mark(p); sp_ProcCompose *c = (sp_ProcCompose *)p; if (c->outer) sp_gc_mark(c->outer); if (c->inner) sp_gc_mark(c->inner); }
 static sp_int sp_proc_compose_fn(void *cap, sp_int argc, sp_int *args) {
   sp_ProcCompose *c = (sp_ProcCompose *)cap;
+  /* The composed proc is usually anonymous at its call site -- `(f >> g).call`
+     holds it in no variable -- so nothing keeps the capture alive while this
+     body runs, and a collection triggered by the inner proc's own allocations
+     freed it before c->outer was read. Rooting the capture marks outer and
+     inner through its scan hook. */
+  SP_GC_ROOT(c);
   /* CRuby enforces the FIRST-CALLED function's arity on the composed call
      (`(f << g).call(x)` runs g first, so g's arity governs). */
   if (c->inner && c->inner->arity >= 0 && argc != c->inner->arity)
