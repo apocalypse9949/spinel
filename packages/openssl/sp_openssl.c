@@ -26,6 +26,7 @@
 #include <openssl/bn.h>
 #include <openssl/objects.h>
 #include <openssl/evp.h>
+#include <openssl/ecdsa.h>
 #include <string.h>
 #include <fcntl.h>
 
@@ -651,4 +652,149 @@ const char *sp_aes_gcm_decrypt(const char *name, const char *key, const char *iv
   out[cn + 1] = 0;
   sp_str_set_len(out, cn + 1);
   return sp_str_as_binary(out);
+}
+
+/* ---------- ECDSA over the same curves ----------
+
+   Signing is the one place in this file where no single API spans its version
+   floor. ECDSA_do_sign is OSSL_DEPRECATEDIN_3_0, and the 3.0 replacement --
+   EVP_PKEY_fromdata into EVP_DigestSign -- did not exist at 1.1.0, so a shim
+   would mean two signing paths of which only one is ever compiled on a given
+   host. A crypto path that never runs where the tests run is a crypto path
+   nobody has checked, so this takes the deprecated call on every version and
+   silences the warning at the one site that earns it. If the floor moves to
+   3.0 the EVP form is a small, single-path replacement.
+
+   Everything either side of that call is current: ECDSA_SIG_get0 and
+   BN_bn2binpad are not deprecated in 3.x and are present at 1.1.0.
+
+   Signatures cross the boundary as raw r || s, two field-width integers, and
+   never as DER. ES256 (RFC 7518) names that encoding, and it is the one place
+   the two shapes are silently interchangeable: a DER signature is a
+   well-formed String that every JWT verifier rejects, so handing one out
+   would fail remotely, in someone else's stack, long after the call. The
+   conversion is here rather than in each caller for exactly that reason. */
+
+static SP_TLS char sp_ecdsa_sig_buf[2 * SP_EC_MAX_FIELD];
+
+/* Sign a digest that has already been computed: ECDSA signs a hash, and which
+   hash is the caller's business (SHA-256 for ES256). A digest longer than the
+   curve's order is truncated by the standard, which is OpenSSL's behaviour and
+   not something to reimplement here. */
+const char *sp_ecdsa_sign(const char *curve, const char *priv, const char *digest) {
+  int flen = 0;
+  EC_GROUP *g = sp_ec_group(curve, &flen);
+  BIGNUM *d = NULL;
+  EC_KEY *k = NULL;
+  ECDSA_SIG *sig = NULL;
+  const BIGNUM *r, *s;
+  int ok = 0;
+
+  sp_ssl_errbuf[0] = 0;
+  if (!g) return sp_ec_fail("unknown or unsupported curve");
+  if (!(d = sp_ec_scalar(g, priv, flen))) {
+    EC_GROUP_free(g);
+    return sp_ec_fail("private key is not a scalar on this curve");
+  }
+
+#if defined(__GNUC__) || defined(__clang__)
+# pragma GCC diagnostic push
+# pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+  if ((k = EC_KEY_new()) && EC_KEY_set_group(k, g) && EC_KEY_set_private_key(k, d)) {
+    EC_POINT *pub = EC_POINT_new(g);
+    if (pub && EC_POINT_mul(g, pub, d, NULL, NULL, NULL) && EC_KEY_set_public_key(k, pub))
+      sig = ECDSA_do_sign((const unsigned char *)digest,
+                          (int)sp_str_byte_len(digest), k);
+    EC_POINT_free(pub);
+  }
+  if (k) EC_KEY_free(k);
+#if defined(__GNUC__) || defined(__clang__)
+# pragma GCC diagnostic pop
+#endif
+
+  if (sig) {
+    ECDSA_SIG_get0(sig, &r, &s);
+    ok = BN_bn2binpad(r, (unsigned char *)sp_ecdsa_sig_buf, flen) == flen &&
+         BN_bn2binpad(s, (unsigned char *)sp_ecdsa_sig_buf + flen, flen) == flen;
+    ECDSA_SIG_free(sig);
+  }
+  BN_clear_free(d);
+  EC_GROUP_free(g);
+  if (!ok) return sp_ec_fail("ECDSA signing failed");
+  sp_ffi_bin_len = 2 * flen;
+  return sp_ecdsa_sig_buf;
+}
+
+/* Verify raw r || s against a public point. Answers 1 only for a signature
+   that verifies: a malformed signature, a point that is not on the curve and
+   a mismatch are all 0, because a caller asking "is this signature good"
+   must not be able to read "the input was strange" as yes. */
+sp_int sp_ecdsa_verify(const char *curve, const char *pub, const char *digest,
+                       const char *sig_bytes) {
+  int flen = 0;
+  EC_GROUP *g = sp_ec_group(curve, &flen);
+  EC_POINT *pt = NULL;
+  EC_KEY *k = NULL;
+  ECDSA_SIG *sig = NULL;
+  BIGNUM *r = NULL, *s = NULL;
+  int rc = 0;
+
+  sp_ssl_errbuf[0] = 0;
+  if (!g) { sp_ssl_note("unknown or unsupported curve"); return 0; }
+  if (sp_str_byte_len(sig_bytes) != (size_t)(2 * flen)) {
+    sp_ssl_note("signature must be r || s, two field-width integers");
+    EC_GROUP_free(g);
+    return 0;
+  }
+  if (!(pt = sp_ec_peer(g, pub, flen))) {
+    sp_ssl_note("public key is not a point on this curve");
+    EC_GROUP_free(g);
+    return 0;
+  }
+
+  /* ECDSA_SIG_set0 takes ownership of both BIGNUMs on success, so they are
+     freed through the signature and not again here. */
+  r = BN_bin2bn((const unsigned char *)sig_bytes, flen, NULL);
+  s = BN_bin2bn((const unsigned char *)sig_bytes + flen, flen, NULL);
+  sig = ECDSA_SIG_new();
+  if (r && s && sig && ECDSA_SIG_set0(sig, r, s)) {
+    r = NULL; s = NULL;
+#if defined(__GNUC__) || defined(__clang__)
+# pragma GCC diagnostic push
+# pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    if ((k = EC_KEY_new()) && EC_KEY_set_group(k, g) && EC_KEY_set_public_key(k, pt))
+      rc = ECDSA_do_verify((const unsigned char *)digest,
+                           (int)sp_str_byte_len(digest), sig, k) == 1;
+    if (k) EC_KEY_free(k);
+#if defined(__GNUC__) || defined(__clang__)
+# pragma GCC diagnostic pop
+#endif
+  }
+
+  if (sig) ECDSA_SIG_free(sig);
+  BN_free(r);
+  BN_free(s);
+  EC_POINT_free(pt);
+  EC_GROUP_free(g);
+  if (!rc) sp_ssl_note("signature did not verify");
+  return rc;
+}
+
+/* Is this a usable public key on this curve? The same test sp_ec_dh makes
+   before it multiplies, exposed so a public-only key can be refused where it
+   is built rather than at first use. */
+sp_int sp_ec_check_point(const char *curve, const char *pub) {
+  int flen = 0;
+  EC_GROUP *g = sp_ec_group(curve, &flen);
+  EC_POINT *pt;
+
+  sp_ssl_errbuf[0] = 0;
+  if (!g) { sp_ssl_note("unknown or unsupported curve"); return 0; }
+  pt = sp_ec_peer(g, pub, flen);
+  EC_POINT_free(pt);
+  EC_GROUP_free(g);
+  if (!pt) { sp_ssl_note("public key is not a point on this curve"); return 0; }
+  return 1;
 }

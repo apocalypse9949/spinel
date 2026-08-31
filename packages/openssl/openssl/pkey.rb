@@ -51,11 +51,38 @@ module OpenSSL
         new(curve, bytes)
       end
 
-      def initialize(curve, private_key_bytes)
+      # A public-only key: everything a verifier has. #verify_raw works on one,
+      # and #dh_compute_key and #sign_raw raise, because there is no scalar to
+      # do them with. The point is checked here rather than at first use, so a
+      # peer key that is not on the curve is rejected where it arrives.
+      def self.from_public_bytes(curve, bytes)
+        new(curve, "", bytes)
+      end
+
+      # An empty private half means "public only"; the two are never both
+      # absent, and the private one wins when both are given, since the public
+      # half derives from it.
+      def initialize(curve, private_key_bytes, public_key_bytes = "")
         @curve = curve
         @private_key_bytes = private_key_bytes
-        @public_key_bytes = Native.ec_public_bytes(curve, private_key_bytes)
-        raise ECError, Native.last_error if @public_key_bytes.empty?
+        if private_key_bytes.empty?
+          raise ECError, "a key needs a private scalar or public bytes" if public_key_bytes.empty?
+          @public_key_bytes = public_key_bytes
+          # The point is checked where it arrives, not at first use: an ECDSA
+          # verify against something that is not on the curve must not be
+          # reachable at all.
+          if Native.ec_check_point(curve, public_key_bytes) != 1
+            raise ECError, Native.last_error
+          end
+        else
+          @public_key_bytes = Native.ec_public_bytes(curve, private_key_bytes)
+          raise ECError, Native.last_error if @public_key_bytes.empty?
+        end
+      end
+
+      # True for a key built from public bytes alone.
+      def public_only?
+        @private_key_bytes.empty?
       end
 
       # CRuby's name; CRuby takes an EC::Point and this takes the same point's
@@ -67,10 +94,51 @@ module OpenSSL
       # answering: an ECDH against an off-curve point leaks the private scalar
       # to whoever chose it.
       def dh_compute_key(peer_public_bytes)
+        need_private!("dh_compute_key")
         secret = Native.ec_dh(@curve, @private_key_bytes, peer_public_bytes)
         raise ECError, Native.last_error if secret.empty?
         secret
       end
+
+      # ECDSA, as the raw `r || s` every JOSE and WebAuthn context means by a
+      # signature -- two field-width integers, 64 bytes on P-256.
+      #
+      # NOT SPELLED #sign, and the difference is the point. CRuby's #sign
+      # answers DER, and a DER signature is a perfectly well-formed String
+      # that every JWT verifier rejects: keeping CRuby's name for bytes CRuby
+      # does not produce would compile a CRuby program here and fail it
+      # remotely, in someone else's stack, long after the call. The argument
+      # shape IS CRuby's -- a digest name and the data, not a pre-computed
+      # hash -- so a caller cannot accidentally sign something unhashed.
+      def sign_raw(digest, data)
+        need_private!("sign_raw")
+        sig = Native.ecdsa_sign(@curve, @private_key_bytes, hash_of(digest, data))
+        raise ECError, Native.last_error if sig.empty?
+        sig
+      end
+
+      # CRuby's #verify argument order, over the same raw signature. Answers
+      # false for a signature that does not verify AND for one that is
+      # malformed: a caller asking "is this good" must not be able to read
+      # "the input was strange" as yes.
+      def verify_raw(digest, signature, data)
+        Native.ecdsa_verify(@curve, @public_key_bytes, hash_of(digest, data), signature) == 1
+      end
+
+      private
+
+      def need_private!(what)
+        raise ECError, "#{what} needs a private key; this one is public only" if public_only?
+      end
+
+      def hash_of(digest, data)
+        case digest.to_s.upcase
+        when "SHA256" then Digest::SHA256.digest(data)
+        when "SHA1"   then Digest::SHA1.digest(data)
+        else raise Digest::DigestError, "unsupported digest algorithm: #{digest}"
+        end
+      end
+
     end
   end
 end
