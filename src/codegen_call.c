@@ -12300,10 +12300,13 @@ int builtin_arity_violation(Compiler *c, int id) {
   return arity_violation(c, id, exp, sizeof exp, &eval_recv);
 }
 
-int emit_builtin_arity_guard(Compiler *c, int id, Buf *b) {
+/* The raise for a count a method refuses: the receiver (when asked) and the
+   arguments evaluated in order, as CRuby evaluates them before it checks the
+   count, then the ArgumentError with `exp` as the range, yielding the call's
+   default value. Shared by the builtin guard and a call through a Method
+   object whose target is known. */
+static void emit_wrong_count(Compiler *c, int id, const char *exp, int eval_recv, Buf *b) {
   const NodeTable *nt = c->nt;
-  char exp[32]; int eval_recv;
-  if (!arity_violation(c, id, exp, sizeof exp, &eval_recv)) return 0;
   int recv = nt_ref(nt, id, "receiver");
   int anode = nt_ref(nt, id, "arguments");
   int argc = 0; const int *argv = anode >= 0 ? nt_arr(nt, anode, "arguments", &argc) : NULL;
@@ -12317,7 +12320,61 @@ int emit_builtin_arity_guard(Compiler *c, int id, Buf *b) {
   buf_printf(b, "sp_raise_cls(\"ArgumentError\","
                 " \"wrong number of arguments (given %d, expected %s)\"); %s; })",
              argc, exp, dv ? dv : "0");
+}
+
+int emit_builtin_arity_guard(Compiler *c, int id, Buf *b) {
+  char exp[32]; int eval_recv;
+  if (!arity_violation(c, id, exp, sizeof exp, &eval_recv)) return 0;
+  emit_wrong_count(c, id, exp, eval_recv, b);
   return 1;
+}
+
+/* The synthesized wrapper a bound builtin's Method resolves to
+   (`"a b".method(:split)`): its parameter list holds the receiver alone, and
+   the builtin's own arguments pass through it unlisted, so no count can be
+   read off it. */
+static int bam_wrapper(const Scope *tm) {
+  return tm->name && strncmp(tm->name, "__bam_", 6) == 0;
+}
+
+/* Does a call through a Method object hand its statically-known target a
+   count it cannot take? Judged for the plain positional shape only: a splat's
+   count is the array's, a keyword hash binds by name, and a keyword or
+   synthesized parameter, or a required one after the rest, binds by other
+   rules; and never the wrapper of a bound builtin, the one target whose self
+   carries a parameter. `exp` receives the range in CRuby's words. */
+static int method_call_count_violation(Compiler *c, Scope *tm, int argc,
+                                       const int *argv, char *exp, size_t cap) {
+  const NodeTable *nt = c->nt;
+  if (tm->kwrest_idx >= 0 || tm->npost_rest > 0 || tm->cs_synth || bam_wrapper(tm)) return 0;
+  for (int k = 0; k < argc; k++) {
+    const char *at = nt_type(nt, argv[k]);
+    if (at && (sp_streq(at, "SplatNode") || sp_streq(at, "KeywordHashNode") ||
+               sp_streq(at, "BlockArgumentNode") || sp_streq(at, "ForwardingArgumentsNode")))
+      return 0;
+  }
+  int nfixed = 0, nreq = 0;
+  for (int i = 0; i < tm->nparams; i++) {
+    if (i == tm->rest_idx) continue;
+    if (!tm->pnames[i] || (tm->pnames[i][0] == '_' && tm->pnames[i][1] == '_') ||
+        callee_has_kwarg(c, tm, tm->pnames[i])) return 0;
+    nfixed++;
+    if (!tm->pdefault || tm->pdefault[i] < 0) nreq++;
+  }
+  if (argc >= nreq && (tm->rest_idx >= 0 || argc <= nfixed)) return 0;
+  if (tm->rest_idx >= 0) snprintf(exp, cap, "%d+", nreq);
+  else if (nreq == nfixed) snprintf(exp, cap, "%d", nfixed);
+  else snprintf(exp, cap, "%d..%d", nreq, nfixed);
+  return 1;
+}
+
+/* A default the trampoline of Method#to_proc can fill in from its own frame:
+   a literal, which reads nothing of the frame it was written in. */
+static int literal_default(Compiler *c, int node) {
+  const char *ty = node >= 0 ? nt_type(c->nt, node) : NULL;
+  return ty && (sp_streq(ty, "IntegerNode") || sp_streq(ty, "FloatNode") ||
+                sp_streq(ty, "StringNode") || sp_streq(ty, "SymbolNode") ||
+                sp_streq(ty, "NilNode") || sp_streq(ty, "TrueNode") || sp_streq(ty, "FalseNode"));
 }
 
 /* The guards for an argument whose static class the method cannot take: raise
@@ -13211,19 +13268,39 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
       if (grt == TY_POLY && nm && (ret == TY_POLY || ret == TY_UNKNOWN) &&
           g_cls_tag_skip != id) {
         int ccls[64], cmi[64], cdef[64], nc = 0;
-        int cargc = 0;
+        int cargc = 0, csplat = 0;
         { int ca = nt_ref(nt, id, "arguments");
-          if (ca >= 0) nt_arr(nt, ca, "arguments", &cargc); }
+          const int *cav = ca >= 0 ? nt_arr(nt, ca, "arguments", &cargc) : NULL;
+          for (int a = 0; a < cargc; a++) {
+            const char *aty5 = cav ? nt_type(nt, cav[a]) : NULL;
+            if (aty5 && sp_streq(aty5, "SplatNode")) csplat = 1;
+            /* a double splat: the raise stands down for it, a plain keyword
+               hash still counts as one positional */
+            if (aty5 && sp_streq(aty5, "KeywordHashNode")) {
+              int en5 = 0; const int *el5 = nt_arr(nt, cav[a], "elements", &en5);
+              for (int e = 0; e < en5; e++)
+                if (el5 && nt_type(nt, el5[e]) && sp_streq(nt_type(nt, el5[e]), "AssocSplatNode"))
+                  csplat = 1;
+            }
+          } }
         for (int k = 0; k < c->nclasses && nc < 64; k++) {
           int dc = -1;
           int mi = comp_cmethod_in_chain(c, k, nm, &dc);
           if (mi < 0 || !scope_has_callable_symbol(c, mi)) continue;
           /* A class method that cannot take this call's arguments is not a
              candidate: emitting its arm put the arity raise in the prelude,
-             where it fired before the tag was even tested (#3520). */
+             where it fired before the tag was even tested (#3520). A rest
+             parameter lifts the upper bound, not the shortfall -- and a splat
+             or double splat at the site makes the count dynamic, so a rest
+             candidate is kept then, its arm carrying no count check that
+             could fire. A fixed-arity candidate's arm checks a trailing
+             splat's length at run time in that same prelude, so which of
+             those arms may be emitted is the question it always was; their
+             counting stands. */
           { Scope *cs4 = &c->scopes[mi];
-            if (cs4->rest_idx < 0 &&
-                (cargc > cs4->nparams || cargc < cs4->nrequired)) continue; }
+            int rreq = rest_shortfall_required(c, cs4);
+            if (cs4->rest_idx < 0 ? (cargc > cs4->nparams || cargc < cs4->nrequired)
+                                  : (!csplat && cargc < rreq)) continue; }
           ccls[nc] = k; cmi[nc] = mi; cdef[nc] = dc; nc++;
         }
         if (nc > 0) {
@@ -16185,13 +16262,36 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       /* a bound __bam wrapper carries param[0] in the Method's self slot:
          proc arg k maps to param[k + shift] */
       int shift = method_call_param_shift(c, mn, target);
-      /* a float/poly parameter reads back from the boxed side-channel the
-         force_poly call site publishes */
+      /* A proc call hands over whatever count its site has, so the binding is
+         a lambda body's: the count checked in CRuby's words, an omitted
+         optional filled from its default, a rest parameter given the surplus
+         as one array read from the boxed side-channel every proc call
+         publishes. Bound one C argument per slot, `m.to_proc.call(1, 2)` on
+         `def r(*v)` read the Integer as the array and crashed, `def o(a, b =
+         2)` called with one answered from an unset b, and a wrong count went
+         through unchecked. A keyword parameter, a required one after the
+         rest, a default that is not a literal, more parameters than the
+         channel's 16 slots, or a bound builtin's wrapper keep the plain
+         positional binding. */
+      int bind = tm->kwrest_idx < 0 && tm->npost_rest == 0 && !tm->cs_synth && !bam_wrapper(tm) &&
+                 np - shift <= 16;
+      int nreq = 0, nfixed = 0;
+      for (int k = shift; k < np && bind; k++) {
+        if (k == tm->rest_idx) continue;
+        if (!tm->pnames[k] || (tm->pnames[k][0] == '_' && tm->pnames[k][1] == '_') ||
+            callee_has_kwarg(c, tm, tm->pnames[k])) { bind = 0; break; }
+        nfixed++;
+        if (!tm->pdefault || tm->pdefault[k] < 0) nreq++;
+        else if (!literal_default(c, tm->pdefault[k])) bind = 0;
+      }
+      /* a float/poly parameter, or the rest's surplus, reads back from the
+         boxed side-channel the call site publishes */
       int needs_slot = 0;
       for (int k = shift; k < np; k++) {
         LocalVar *pp = scope_local(tm, tm->pnames[k]);
         TyKind pt = pp ? pp->type : TY_INT;
-        if (pt == TY_POLY || pt == TY_FLOAT) needs_slot = 1;
+        if (pt == TY_POLY || pt == TY_FLOAT || (bind && (k == tm->rest_idx || proc_slot_via_poly(c, pt))))
+          needs_slot = 1;
       }
       if (needs_slot && !g_needs_proc_poly_argslot) {
         g_needs_proc_poly_argslot = 1;
@@ -16199,7 +16299,48 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       }
       Buf *pb = &g_procs;
       buf_printf(pb, "static sp_int _mtp_%d(void *cap, sp_int argc, sp_int *args) {\n", tid);
+      if (bind && tm->rest_idx >= 0) buf_puts(pb, "  SP_GC_SAVE();\n");
       buf_puts(pb, "  sp_BoundMethod *_m = (sp_BoundMethod *)cap; (void)_m; (void)argc; (void)args;\n");
+      if (bind) {
+        char expb[32];
+        if (tm->rest_idx >= 0) snprintf(expb, sizeof expb, "%d+", nreq);
+        else if (nreq == nfixed) snprintf(expb, sizeof expb, "%d", nfixed);
+        else snprintf(expb, sizeof expb, "%d..%d", nreq, nfixed);
+        if (nreq > 0 || tm->rest_idx < 0) {
+          buf_printf(pb, "  if (argc < %d", nreq);
+          if (tm->rest_idx < 0) buf_printf(pb, " || argc > %d", nfixed);
+          buf_printf(pb, ") { const char *_e = sp_sprintf(\"wrong number of arguments"
+                         " (given %%lld, expected %s)\", (long long)argc); SP_GC_ROOT_STR(_e);"
+                         " sp_raise_cls(\"ArgumentError\", _e); }\n", expb);
+        }
+        for (int k = shift; k < np; k++) {
+          int j = k - shift;
+          if (k == tm->rest_idx) {
+            buf_printf(pb, "  sp_PolyArray *_a%d = sp_PolyArray_new(); SP_GC_ROOT(_a%d);"
+                           " for (sp_int _i = %d; _i < argc && _i < 16; _i++)"
+                           " sp_PolyArray_push(_a%d, _sp_proc_poly_args[_i]);\n", j, j, j, j);
+            continue;
+          }
+          LocalVar *pp = scope_local(tm, tm->pnames[k]);
+          TyKind pt = pp ? pp->type : TY_INT;
+          char slot[48]; snprintf(slot, sizeof slot, "_sp_proc_poly_args[%d]", j);
+          buf_puts(pb, "  "); emit_ctype(c, pt, pb);
+          buf_printf(pb, " _a%d = (argc > %d) ? ", j, j);
+          if (pt == TY_POLY) buf_puts(pb, slot);
+          else if (pt == TY_FLOAT) buf_printf(pb, "sp_poly_to_f(%s)", slot);
+          else if (pt == TY_SYMBOL) buf_printf(pb, "(sp_sym)args[%d]", j);
+          else if (proc_slot_is_ptr(pt)) { buf_puts(pb, "("); emit_ctype(c, pt, pb); buf_printf(pb, ")(uintptr_t)args[%d]", j); }
+          else if (proc_slot_via_poly(c, pt)) emit_unbox_text(c, pt, slot, pb);
+          else buf_printf(pb, "args[%d]", j);
+          buf_puts(pb, " : ");
+          if (tm->pdefault && tm->pdefault[k] >= 0) emit_arg_or_default(c, tm, k, -1, pb);
+          else buf_puts(pb, pt == TY_RANGE ? "(sp_Range){0}" : default_value(pt));
+          buf_puts(pb, ";\n");
+        }
+        /* the channel is consumed, as a lambda body leaves it */
+        if (needs_slot)
+          buf_puts(pb, "  for (sp_int _i = 0; _i < argc && _i < 16; _i++) _sp_proc_poly_args[_i] = sp_box_nil();\n");
+      }
       /* the call expression: sp_<name>(args...) for a top-level target, else
          the typed fn cast through _m->fn with _m->self first */
       Buf cb = {0};
@@ -16224,7 +16365,8 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         if (k > shift) buf_puts(&cb, ", ");
         LocalVar *pp = scope_local(tm, tm->pnames[k]);
         TyKind pt = pp ? pp->type : TY_INT;
-        if (pt == TY_POLY) buf_printf(&cb, "_sp_proc_poly_args[%d]", k - shift);
+        if (bind) buf_printf(&cb, "_a%d", k - shift);
+        else if (pt == TY_POLY) buf_printf(&cb, "_sp_proc_poly_args[%d]", k - shift);
         else if (pt == TY_FLOAT) buf_printf(&cb, "sp_poly_to_f(_sp_proc_poly_args[%d])", k - shift);
         else if (pt == TY_SYMBOL) buf_printf(&cb, "(sp_sym)args[%d]", k - shift);
         else if (proc_slot_is_ptr(pt)) {
@@ -16659,46 +16801,37 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     int target = mn >= 0 ? method_obj_target_mi(c, mn) : -1;
     int target_recvless = (mn >= 0 && nt_ref(nt, mn, "receiver") < 0);
     if (target >= 0 && target_recvless) {
-      /* A trailing splat argument (`m[*args]` / `m.call(*args)`) expands into
-         the remaining declared params at runtime: the target's arity is
-         static, so read the splatted array element-by-element into each slot
-         -- passing the raw array was a fixed-arity C call with one pointer
-         arg (#3248). */
-      int splat_at = -1;
-      for (int k = 0; k < argc; k++) {
-        const char *aty2 = nt_type(nt, argv[k]);
-        if (aty2 && sp_streq(aty2, "SplatNode")) { splat_at = k; break; }
-      }
-      if (splat_at >= 0 && splat_at == argc - 1) {
-        Scope *tms = &c->scopes[target];
-        int ts = ++g_tmp;
-        buf_printf(b, "({ sp_PolyArray *_t%d = ", ts);
-        emit_expr(c, argv[splat_at], b);   /* splat-to-array, normalized poly */
-        buf_printf(b, "; SP_GC_ROOT(_t%d); ", ts);
-        emit_method_cname(c, tms, b);
-        buf_puts(b, "(");
-        for (int k = 0; k < tms->nparams; k++) {
-          if (k) buf_puts(b, ", ");
-          if (k < splat_at) { emit_arg_or_default(c, tms, k, argv[k], b); continue; }
-          LocalVar *pp = tms->pnames ? scope_local(tms, tms->pnames[k]) : NULL;
-          TyKind pt2 = pp ? pp->type : TY_INT;
-          char el[64];
-          snprintf(el, sizeof el, "sp_PolyArray_get(_t%d, %d)", ts, k - splat_at);
-          if (pt2 == TY_POLY) buf_puts(b, el);
-          else emit_unbox_text(c, pt2, el, b);
-        }
-        buf_puts(b, "); })");
-        return;
-      }
-      /* top-level / self method: direct call sp_<name>(args). Coerce each arg to
-         the target's parameter type (emit_arg_or_default boxes an int arg into a
-         poly param widened under promote, etc.). */
-      emit_method_cname(c, &c->scopes[target], b);
+      /* A top-level target is called the way its name would be: the ordinary
+         argument lowering binds the site's arguments to the target's
+         parameters -- an omitted optional takes its default, a rest parameter
+         takes the surplus as one array, a keyword lands in its own slot, a
+         splat spreads at run time -- and a count or keyword the target cannot
+         take is CRuby's ArgumentError ahead of the call. Handed over one C
+         argument per site argument, `def f(*a)` took a raw Integer in its
+         array pointer, `def f(a, b = 2)` was a C call one argument short, and
+         a wrong count was the C compiler's error. */
+      Scope *tms = &c->scopes[target];
+      emit_method_cname(c, tms, b);
       buf_puts(b, "(");
-      for (int k = 0; k < argc; k++) {
-        if (k) buf_puts(b, ", ");
-        if (k < c->scopes[target].nparams) emit_arg_or_default(c, &c->scopes[target], k, argv[k], b);
-        else emit_expr(c, argv[k], b);
+      emit_args_filled(c, target, nt_ref(nt, id, "arguments"), "", b);
+      /* an out-of-line callee keeping a &block parameter takes the site's
+         literal block, or a Proc passed with &, or none */
+      if (tms->blk_param && tms->blk_param[0] && !tms->yields) {
+        int bn = nt_ref(nt, id, "block");
+        const char *bty = bn >= 0 ? nt_type(nt, bn) : NULL;
+        int bx = (bty && sp_streq(bty, "BlockArgumentNode")) ? nt_ref(nt, bn, "expression") : -1;
+        if (tms->nparams > 0) buf_puts(b, ", ");
+        if (bty && sp_streq(bty, "BlockNode")) {
+          int tb = ++g_tmp;
+          Buf pv; memset(&pv, 0, sizeof pv);
+          emit_proc_literal(c, bn, &pv);
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "sp_Proc *_t%d = %s; SP_GC_ROOT(_t%d);\n", tb, pv.p ? pv.p : "NULL", tb);
+          free(pv.p);
+          buf_printf(b, "_t%d", tb);
+        }
+        else if (bx >= 0 && comp_ntype(c, bx) == TY_PROC) emit_expr(c, bx, b);
+        else buf_puts(b, "NULL");
       }
       buf_puts(b, ")");
       return;
@@ -16714,6 +16847,16 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     /* a bound __bam wrapper carries param[0] in the Method's self slot:
        call arg k is coerced to param[k + shift] */
     int shift = target >= 0 ? method_call_param_shift(c, mn, target) : 0;
+    /* A count the target cannot take is CRuby's ArgumentError before any
+       call: bound positionally, `def z; end` took `m.call(1)` and answered,
+       and `def o(a, b = 2)` answered `m.call` from its defaults. */
+    if (tm) {
+      char exp9[32];
+      if (method_call_count_violation(c, tm, argc, argv, exp9, sizeof exp9)) {
+        emit_wrong_count(c, id, exp9, 1, b);
+        return;
+      }
+    }
     /* When the target is unresolved under promote, fall back to the poly ABI
        (sp_RbVal self/args/return) rather than the legacy sp_int ABI: every
        method is poly-signatured in promote, so a `(void*, sp_int)->sp_int`
