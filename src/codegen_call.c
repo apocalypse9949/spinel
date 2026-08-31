@@ -6005,6 +6005,34 @@ else {
          write a different chunk on each call). Skip when the call is
          keyword-only: atmp[0] is then uninitialised because pos_argc == 0
          when kwh >= 0, and IO#write has no keyword form. */
+      /* read_nonblock on the builtin IO tag, the same shape as the write arm
+         below: a Socket reaching this dispatch because some user class owns
+         the name had no arm and raised NoMethodError (#4236). The keyword
+         hash is read off the CALL, not off a temp -- `exception: false` is
+         part of the shape, not an argument that flows -- and the positional
+         length rides its already-materialised temp. */
+      if (sp_streq(name, "read_nonblock") && pos_argc == 1) {
+        int no_exc7 = 0;
+        if (kwh >= 0) {
+          int e7 = kwh_lookup(nt, kwh, "exception");
+          no_exc7 = e7 >= 0 && nt_type(nt, e7) && sp_streq(nt_type(nt, e7), "FalseNode");
+        }
+        int trd7 = ++g_tmp;
+        buf_printf(b, " case SP_BUILTIN_IO: { const char *_t%d = sp_sock_read_nb("
+                      "(sp_File *)_t%d.v.p, ", trd7, tv);
+        if (atmp_ty[0] == TY_POLY) buf_printf(b, "sp_poly_to_i(_t%d)", atmp[0]);
+        else buf_printf(b, "(sp_int)_t%d", atmp[0]);
+        buf_printf(b, ", %d, 0); ", no_exc7 ? 0 : 1);
+        buf_printf(b, "_t%d = ", tr);
+        if (ret == TY_POLY) {
+          if (no_exc7)
+            buf_printf(b, "_t%d ? sp_box_str(_t%d) : sp_box_sym(sp_sym_intern(\"wait_readable\"))",
+                       trd7, trd7);
+          else buf_printf(b, "sp_box_str(_t%d)", trd7);
+        }
+        else buf_printf(b, "_t%d", trd7);
+        buf_puts(b, "; break; }");
+      }
       if (sp_streq(name, "write") && argc == 1 && kwh < 0) {
         int wrv = ++g_tmp;
         if (atmp_ty[0] == TY_STRING) {
@@ -18263,7 +18291,12 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        sp_streq(name, "tty?") || sp_streq(name, "isatty") ||
        (sp_streq(name, "winsize") && sp_feature_enabled("io/console")) ||
        sp_streq(name, "readlines") || sp_streq(name, "rewind") ||
-       sp_streq(name, "sync") || sp_streq(name, "sync="))) {
+       sp_streq(name, "sync") || sp_streq(name, "sync=") ||
+       /* the non-blocking pair: a Socket destructured out of Socket.pair, or
+          read back out of a container, is a poly value like any other, and
+          without an arm here `w.read_nonblock(n, exception: false)` had no
+          emitter at all (#4236/#4237) */
+       sp_streq(name, "read_nonblock") || sp_streq(name, "write_nonblock"))) {
     int iocand = 0;
     for (int k = 0; k < c->nclasses && !iocand; k++)
       if (comp_method_in_chain(c, k, name, NULL) >= 0 ||
@@ -18329,6 +18362,44 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         buf_printf(b, "sp_bool _t%d = sp_poly_truthy(", ts3);
         emit_boxed(c, argv[0], b);
         buf_printf(b, "); if (_t%d) sp_File_flush(_t%d); _t%d; })", ts3, tio2, ts3);
+      }
+      /* read_nonblock / write_nonblock, the same answers the typed-receiver
+         arms give: `exception: false` answers the wait symbol (read) or nil
+         (write) instead of raising, so those shapes are poly (#4236/#4237). */
+      else if ((sp_streq(name, "read_nonblock") || sp_streq(name, "write_nonblock")) &&
+               argc >= 1) {
+        const char *lty9 = nt_type(nt, argv[argc - 1]);
+        int kwh9 = (lty9 && sp_streq(lty9, "KeywordHashNode")) ? argv[argc - 1] : -1;
+        int exc9 = kwh9 >= 0 ? kwh_lookup(nt, kwh9, "exception") : -1;
+        int no_exc9 = exc9 >= 0 && nt_type(nt, exc9) &&
+                      sp_streq(nt_type(nt, exc9), "FalseNode");
+        if (sp_streq(name, "read_nonblock")) {
+          if (no_exc9) {
+            int tw9 = ++g_tmp;
+            buf_printf(b, "const char *_t%d = sp_sock_read_nb(_t%d, ", tw9, tio2);
+            emit_int_expr(c, argv[0], b);
+            buf_printf(b, ", 0, 0); _t%d ? sp_box_str(_t%d)"
+                          " : sp_box_sym(sp_sym_intern(\"wait_readable\")); })", tw9, tw9);
+          }
+          else {
+            buf_printf(b, "sp_sock_read_nb(_t%d, ", tio2);
+            emit_int_expr(c, argv[0], b);
+            buf_puts(b, ", 1, 0); })");
+          }
+        }
+        else {
+          /* a String operand keeps its byte length (an embedded NUL is a byte
+             of the message); anything else goes through to_s */
+          int skw9 = comp_ntype(c, argv[0]) == TY_STRING;
+          const char *wfn9 = skw9 ? "sp_sock_write_nb_bin" : "sp_sock_write_nb";
+          int tw9 = ++g_tmp;
+          buf_printf(b, "sp_int _t%d = %s(_t%d, ", tw9, wfn9, tio2);
+          emit_to_s_expr(c, argv[0], b);
+          if (no_exc9)
+            buf_printf(b, ", 0); _t%d < 0 ? sp_box_nil() : sp_box_int(_t%d); })", tw9, tw9);
+          else
+            buf_printf(b, ", 1); _t%d; })", tw9);
+        }
       }
       /* read(n) reads UP TO n bytes; dropping the count read to EOF, which on
          a socket with a live peer never comes -- `r.read(5)` hung forever. */

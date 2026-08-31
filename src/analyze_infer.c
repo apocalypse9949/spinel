@@ -4610,6 +4610,15 @@ else {
          `size[0]` that follows reads it as an untyped value. */
       if (sp_streq(name, "winsize") && sp_feature_enabled("io/console"))
         return an_poly_concrete(c, name, TY_INT_ARRAY);
+      /* the non-blocking pair on a poly-carried handle, typed as the TY_IO arm
+         types it: `exception: false` answers a wait symbol (read) or nil
+         (write) as well as the ordinary result, so that shape is poly and a
+         String slot cannot hold it (#4236/#4237) */
+      if ((sp_streq(name, "read_nonblock") || sp_streq(name, "write_nonblock")) &&
+          an_nonblock_no_exception(c, id))
+        return an_poly_concrete(c, name, TY_POLY);
+      if (sp_streq(name, "read_nonblock")) return an_poly_concrete(c, name, TY_STRING);
+      if (sp_streq(name, "write_nonblock")) return an_poly_concrete(c, name, TY_INT);
       if (sp_streq(name, "read") || sp_streq(name, "gets") ||
           sp_streq(name, "readline")) return an_poly_concrete(c, name, TY_STRING);
       if (sp_streq(name, "write")) return an_poly_concrete(c, name, TY_INT);   /* IO#write: the byte count */
