@@ -57,6 +57,13 @@ module OpenSSL
                 :string, "sp_aes_gcm_encrypt"
     native_func :aes_gcm_decrypt, [:string, :string, :string, :string, :string, :string],
                 :string, "sp_aes_gcm_decrypt"
+
+    # ECDSA over the same curves, with signatures as raw r || s rather than
+    # DER -- the conversion is in the C because a DER signature is a
+    # well-formed String that every JWT verifier rejects.
+    native_func :ecdsa_sign,    [:string, :string, :string],          :cbinstr, "sp_ecdsa_sign"
+    native_func :ecdsa_verify,  [:string, :string, :string, :string], :int,     "sp_ecdsa_verify"
+    native_func :ec_check_point, [:string, :string],                  :int,     "sp_ec_check_point"
     ffi_lib "ssl"
     ffi_lib "crypto"
   end
