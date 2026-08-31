@@ -61,7 +61,11 @@ typedef struct {
 } sp_ssl_conn;
 
 static sp_ssl_conn sp_ssl_tab[SP_SSL_MAX];
-static char sp_ssl_errbuf[512];
+/* Per-thread, like sp_ssl_want_state below: this is a "what happened on MY
+   last call" slot, and spinel runs native calls on parallel workers. As a
+   process-global it let one thread's success clear another's failure -- and
+   two threads doing TLS could already read each other's reasons. */
+static SP_TLS char sp_ssl_errbuf[512];
 static char *sp_ssl_rdbuf;
 
 /* Record the most recent failure so the Ruby side can raise with a reason
@@ -600,10 +604,20 @@ const char *sp_aes_gcm_encrypt(const char *name, const char *key, const char *iv
   return sp_str_as_binary(out);
 }
 
-/* The plaintext, or an empty string with the reason in last_error. A tag that
-   does not verify is a failure like any other and must not answer plaintext:
-   EVP_CipherFinal_ex is what performs that check, which is why the tag is set
-   before it and the result of that call is not ignored. */
+/* On success, 0x01 || plaintext; on failure, an empty string with the reason in
+   last_error. A tag that does not verify is a failure like any other and must
+   not answer plaintext: EVP_CipherFinal_ex performs that check, which is why
+   the tag is set before it and the result of that call is not ignored.
+
+   THE STATUS BYTE IS WHY THIS DOES NOT ANSWER THE PLAINTEXT PLAINLY. An empty
+   string is a legitimate plaintext -- the message of zero bytes -- so "empty"
+   cannot also mean "forged", and a verdict read from a separate call is a
+   verdict that can be wrong: another thread's success can clear the error slot
+   between the two, and a forged message then arrives as valid empty plaintext.
+   Making the answer carry its own verdict removes the window rather than
+   narrowing it, and one byte is a cheap price for an authentication result
+   that cannot be read out of order. (The encrypt side needs no such byte: its
+   answer always carries a 16-byte tag, so empty is unambiguous there.) */
 const char *sp_aes_gcm_decrypt(const char *name, const char *key, const char *iv,
                                const char *aad, const char *ct, const char *tag) {
   size_t cn = sp_str_byte_len(ct);
@@ -618,19 +632,23 @@ const char *sp_aes_gcm_decrypt(const char *name, const char *key, const char *iv
   }
   if (!(ctx = sp_gcm_begin(name, key, iv, 0))) return sp_str_from_bytes("", 0);
 
-  out = sp_str_alloc(cn);
+  out = sp_str_alloc(cn + 1);
+  out[0] = 0x01;
   ok = sp_gcm_aad(ctx, aad) &&
-       EVP_CipherUpdate(ctx, (unsigned char *)out, &n1,
+       EVP_CipherUpdate(ctx, (unsigned char *)out + 1, &n1,
                         (const unsigned char *)ct, (int)cn) &&
        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG, SP_GCM_TAG,
                            (void *)tag) &&
-       EVP_CipherFinal_ex(ctx, (unsigned char *)out + n1, &n2);
+       EVP_CipherFinal_ex(ctx, (unsigned char *)out + 1 + n1, &n2);
   EVP_CIPHER_CTX_free(ctx);
   if (!ok || (size_t)(n1 + n2) != cn) {
+    /* Never hand back a partial plaintext from a message that did not
+       authenticate, not even to a caller that would discard it. */
+    OPENSSL_cleanse(out, cn + 1);
     sp_ssl_note("AES-GCM decrypt failed: auth tag did not verify");
     return sp_str_from_bytes("", 0);
   }
-  out[cn] = 0;
-  sp_str_set_len(out, cn);
+  out[cn + 1] = 0;
+  sp_str_set_len(out, cn + 1);
   return sp_str_as_binary(out);
 }

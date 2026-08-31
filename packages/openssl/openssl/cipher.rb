@@ -134,8 +134,10 @@ module OpenSSL
       data = @parts.join
 
       if @encrypting
+        # Encrypt needs no status byte: the answer always carries a 16-byte
+        # tag, so empty is unambiguously a failure.
         out = Native.aes_gcm_encrypt(@name, @key, @iv, @auth_data, data)
-        check!
+        raise CipherError, reason("AES-GCM encrypt failed") if out.empty?
         # ciphertext || tag: the C returns both in one value, and the tag is
         # always the last 16 bytes.
         @auth_tag = out.byteslice(out.bytesize - 16, 16)
@@ -145,8 +147,12 @@ module OpenSSL
           raise CipherError, "auth_tag must be set before final on a decrypt"
         end
         out = Native.aes_gcm_decrypt(@name, @key, @iv, @auth_data, data, @expected_tag)
-        check!
-        out
+        # The verdict is the answer's own first byte, not a second call: an
+        # empty string is a legitimate plaintext, so it cannot also mean
+        # "forged", and an out-of-band verdict can be read after another
+        # thread has overwritten it. last_error is only the wording.
+        raise CipherError, reason("AES-GCM decrypt failed") if out.empty?
+        out.byteslice(1, out.bytesize - 1)
       end
     end
 
@@ -158,11 +164,12 @@ module OpenSSL
 
     private
 
-    # The C answers an empty string for both a failure and a legitimately empty
-    # result (the plaintext of an empty message), so the reason is what decides.
-    def check!
+    # last_error is per-thread, so this is the caller's own reason; it is the
+    # wording of a failure the return value has already established, never the
+    # test for whether one happened.
+    def reason(fallback)
       err = Native.last_error
-      raise CipherError, err unless err.empty?
+      err.empty? ? fallback : err
     end
   end
 end
