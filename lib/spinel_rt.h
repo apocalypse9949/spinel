@@ -10214,14 +10214,14 @@ static sp_int sp_proc_compose_fn(void *cap, sp_int argc, sp_int *args) {
      inner through its scan hook. */
   SP_GC_ROOT(c);
   /* CRuby enforces the FIRST-CALLED function's arity on the composed call
-     (`(f << g).call(x)` runs g first, so g's arity governs). */
-  if (c->inner && c->inner->arity >= 0 && argc != c->inner->arity)
+     (`(f << g).call(x)` runs g first, so g's arity governs) -- for a LAMBDA;
+     a plain proc adjusts, as everywhere else. */
+  if (c->inner && c->inner->lambda_p && c->inner->arity >= 0 && argc != c->inner->arity)
     sp_raise_cls("ArgumentError", sp_sprintf("wrong number of arguments (given %lld, expected %lld)",
                                              (long long)argc, (long long)c->inner->arity));
   sp_int inner_args[16] = {0};
   sp_int inner_argc = argc > 16 ? 16 : argc;
   for (sp_int _i = 0; _i < inner_argc; _i++) inner_args[_i] = args ? args[_i] : 0;
-  if (inner_argc < 1) inner_argc = 1;
   /* the caller already published the boxed argument(s) to the side-channel, so
      the inner proc reads them back regardless of its parameters' static types */
   sp_proc_call(c->inner, inner_argc, inner_args);
@@ -10230,8 +10230,8 @@ static sp_int sp_proc_compose_fn(void *cap, sp_int argc, sp_int *args) {
      the side-channel, a concrete one reads the sp_int slot. */
   sp_RbVal mid = _sp_proc_poly_ret;
   /* the outer function always receives the single threaded value; CRuby
-     raises when its arity disagrees (`(f >> g)` reaching a 2-ary g). */
-  if (c->outer && c->outer->arity >= 0 && c->outer->arity != 1)
+     raises when a lambda's arity disagrees (`(f >> g)` reaching a 2-ary g). */
+  if (c->outer && c->outer->lambda_p && c->outer->arity >= 0 && c->outer->arity != 1)
     sp_raise_cls("ArgumentError", sp_sprintf("wrong number of arguments (given 1, expected %lld)",
                                              (long long)c->outer->arity));
   sp_int outer_args[16] = {0};

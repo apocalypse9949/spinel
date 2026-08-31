@@ -17154,6 +17154,22 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     buf_printf(b, "; SP_GC_ROOT(_t%d); sp_proc_compose(_t%d, _t%d); })", t2, t1, t2);
     return;
   }
+  /* Composing something that can never answer #call (`f >> 1`): CRuby's
+     Proc#>> refuses the operand up front. Both operands still evaluate,
+     receiver first, before the raise. A reopened builtin with its own
+     #call disarms the rule, mirroring the inference side. */
+  if (recv >= 0 &&
+      (comp_ntype(c, recv) == TY_PROC || comp_ntype(c, recv) == TY_CURRY ||
+       comp_ntype(c, recv) == TY_METHOD) &&
+      argc == 1 && (sp_streq(name, "<<") || sp_streq(name, ">>")) &&
+      ty_never_callable(comp_ntype(c, argv[0])) &&
+      !user_defines_or_reads(c, "call")) {
+    buf_puts(b, "({ (void)("); emit_expr(c, recv, b);
+    buf_puts(b, "); (void)("); emit_boxed(c, argv[0], b);
+    buf_puts(b, "); sp_raise_cls(\"TypeError\", \"callable object is expected\");"
+                " (sp_Proc *)NULL; })");
+    return;
+  }
   if (recv >= 0 && comp_ntype(c, recv) == TY_PROC && argc == 0 && sp_streq(name, "arity")) {
     buf_puts(b, "sp_proc_arity("); emit_expr(c, recv, b); buf_puts(b, ")"); return;
   }
