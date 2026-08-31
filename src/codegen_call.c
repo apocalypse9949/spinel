@@ -5965,15 +5965,15 @@ else {
          #write), so the builtin tag needs its own case. Use the arg's
          already-materialised temp `_t<atmp[0]>` (re-emitting argv[0] would
          re-evaluate side effects like `poly_io.write(next_chunk())` and
-         write a different chunk on each call). The String arm sizes the
-         write with sp_str_byte_len so an embedded NUL survives; the poly
-         arm's sp_poly_to_s result may be a marked String or a static SPL()
-         literal, so it uses the strlen-based sp_File_write. */
-      if (sp_streq(name, "write") && argc == 1) {
+         write a different chunk on each call). Skip when the call is
+         keyword-only: atmp[0] is then uninitialised because pos_argc == 0
+         when kwh >= 0, and IO#write has no keyword form. */
+      if (sp_streq(name, "write") && argc == 1 && kwh < 0) {
         int wrv = ++g_tmp;
         if (atmp_ty[0] == TY_STRING) {
-          /* sp_File_write_bin sizes the operand with sp_str_byte_len, so an
-             embedded NUL reaches the descriptor; the bare sp_File_write
+          /* String arg: the temp is a const char * from a String source.
+             sp_File_write_bin sizes the operand with sp_str_byte_len, so
+             an embedded NUL reaches the descriptor; sp_File_write
              truncates on NUL. */
           if (ret == TY_POLY)
             buf_printf(b, " case SP_BUILTIN_IO: { sp_int _t%d = sp_File_write_bin("
@@ -5986,19 +5986,36 @@ else {
                        tr, tv, atmp[0]);
         }
         else {
-          /* sp_poly_to_s may return a marked String or a static SPL()
-             literal: the strlen-based sp_File_write is the only shared
-             entry that is correct for both shapes. */
-          int wrs = ++g_tmp;
-          if (ret == TY_POLY)
-            buf_printf(b, " case SP_BUILTIN_IO: { const char *_t%d = sp_poly_to_s(_t%d); "
-                           "sp_int _t%d = sp_File_write((sp_File *)_t%d.v.p, _t%d); "
-                           "_t%d = sp_box_int(_t%d); break; }",
-                       wrs, atmp[0], wrv, tv, wrs, tr, wrv);
-          else
-            buf_printf(b, " case SP_BUILTIN_IO: { const char *_t%d = sp_poly_to_s(_t%d); "
-                           "_t%d = sp_File_write((sp_File *)_t%d.v.p, _t%d); break; }",
-                       wrs, atmp[0], tr, tv, wrs);
+          /* Non-String arg: atmp[0] is either sp_RbVal (TY_POLY/TY_NIL/
+             TY_VOID/TY_UNKNOWN were stored boxed at allocation) or a
+             scalar slot (TY_INT, TY_FLOAT, ...). Box the scalar into
+             sp_RbVal first, then route the boxed value through
+             sp_poly_to_s. When the slot is TY_POLY, the runtime value
+             may carry SP_TAG_STR (a String that came in through a poly
+             param or ivar read); in that case the SP_TAG_STR branch uses
+             sp_File_write_bin directly so an embedded NUL survives,
+             otherwise sp_poly_to_s may return either a marked String
+             (also safe to binary-write) or a static SPL() literal
+             (strlen-based, which sp_File_write already handles). The
+             result is always boxed to sp_RbVal (wrv) so the surrounding
+             _t<tr> either takes it directly (ret == TY_POLY) or unboxes
+             to sp_int (ret == TY_INT). */
+          int wrr = ++g_tmp, wrv = ++g_tmp;
+          char a0n[24]; snprintf(a0n, sizeof a0n, "_t%d", atmp[0]);
+          buf_puts(b, " case SP_BUILTIN_IO: { ");
+          if (atmp_ty[0] != TY_POLY) {
+            buf_printf(b, "sp_RbVal _t%d = ", wrr);
+            emit_boxed_text(c, atmp_ty[0], a0n, b);
+            buf_puts(b, "; ");
+          }
+          else buf_printf(b, "sp_RbVal _t%d = %s; ", wrr, a0n);
+          buf_printf(b, "sp_RbVal _t%d = (_t%d.tag == SP_TAG_STR) ? "
+                         "sp_box_int(sp_File_write_bin((sp_File *)_t%d.v.p, _t%d.v.s)) : "
+                         "sp_box_int(sp_File_write((sp_File *)_t%d.v.p, sp_poly_to_s(_t%d))); ",
+                       wrv, wrr, tv, wrr, tv, wrr);
+          if (ret == TY_POLY) buf_printf(b, "_t%d = _t%d; ", tr, wrv);
+          else                buf_printf(b, "_t%d = sp_poly_to_i(_t%d); ", tr, wrv);
+          buf_puts(b, "break; }");
         }
       }
       if (is_push) {
