@@ -79,10 +79,16 @@ sp_int sp_str_casecmp(const char*a,const char*b){if(!a)sp_nil_recv("casecmp");if
   size_t la=sp_str_byte_len(a),lb=sp_str_byte_len(b),n=la<lb?la:lb;
   for(size_t i=0;i<n;i++){int ca=tolower((unsigned char)a[i]),cb=tolower((unsigned char)b[i]);if(ca!=cb)return ca<cb?-1:1;}
   return la==lb?0:(la<lb?-1:1);}
-sp_bool sp_str_valid_encoding(const char*s){if(!s)sp_nil_recv("valid_encoding?");const unsigned char*p=(const unsigned char*)s;while(*p){unsigned c=*p;if(c<0x80){p++;continue;}int extra;unsigned cp;unsigned min;if((c&0xE0)==0xC0){extra=1;cp=c&0x1F;min=0x80;}
+/* ASCII-8BIT has no invalid byte sequence -- every byte is a character -- so a
+   BINARY string is valid by definition and never walked. On the text side the
+   walk is bounded by the byte length rather than by a terminator: a NUL is a
+   valid UTF-8 character, and stopping there would call "a\0\xff" valid. */
+sp_bool sp_str_valid_encoding(const char*s){if(!s)sp_nil_recv("valid_encoding?");
+  if(sp_str_is_binary(s))return TRUE;
+  const unsigned char*p=(const unsigned char*)s;const unsigned char*e=p+sp_str_byte_len(s);while(p<e){unsigned c=*p;if(c<0x80){p++;continue;}int extra;unsigned cp;unsigned min;if((c&0xE0)==0xC0){extra=1;cp=c&0x1F;min=0x80;}
 else if((c&0xF0)==0xE0){extra=2;cp=c&0x0F;min=0x800;}
 else if((c&0xF8)==0xF0){extra=3;cp=c&0x07;min=0x10000;}
-else return FALSE;p++;for(int i=0;i<extra;i++){if((*p&0xC0)!=0x80)return FALSE;cp=(cp<<6)|(*p&0x3F);p++;}if(cp<min)return FALSE;if(cp>=0xD800&&cp<=0xDFFF)return FALSE;if(cp>0x10FFFF)return FALSE;}return TRUE;}
+else return FALSE;p++;for(int i=0;i<extra;i++){if(p>=e||(*p&0xC0)!=0x80)return FALSE;cp=(cp<<6)|(*p&0x3F);p++;}if(cp<min)return FALSE;if(cp>=0xD800&&cp<=0xDFFF)return FALSE;if(cp>0x10FFFF)return FALSE;}return TRUE;}
 /* Extract the n-th field (0-based) from s split by sep, without
    allocating a full StrArray.  Returns a newly allocated string.
    If the field doesn't exist, returns "". */
@@ -124,7 +130,11 @@ void sp_nil_recv(const char*meth){SP_GC_ROOT_STR(meth);
 }
 sp_int sp_str_length_m(const char*s){if(!s)sp_nil_recv("length");return sp_str_length(s);}
 sp_int sp_str_bytesize_m(const char*s){if(!s)sp_nil_recv("bytesize");return (sp_int)sp_str_byte_len(s);}
-sp_bool sp_str_empty_p(const char*s){if(!s)sp_nil_recv("empty?");return *s==0;}
+/* A NUL is a byte, not a terminator: "\0abc" is four bytes long and not
+   empty, and a binary string starting with one is ordinary. The first-byte
+   test still decides every non-empty string in one load; only a leading NUL
+   pays for the header read that knows the real length. */
+sp_bool sp_str_empty_p(const char*s){if(!s)sp_nil_recv("empty?");return *s==0&&sp_str_byte_len(s)==0;}
 const char*sp_str_plus(const char*a,const char*b){SP_GC_ROOT_STR(a);SP_GC_ROOT_STR(b);
   if(!a)sp_nil_recv("+");
   if(!b)sp_raise_cls("TypeError","no implicit conversion of nil into String");

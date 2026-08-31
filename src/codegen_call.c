@@ -20728,7 +20728,10 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
             if (sp_streq(name, "to_f"))       { buf_printf(b, "sp_str_to_f(%s)", s); return; }
             if (sp_streq(name, "length") || sp_streq(name, "size")) { buf_printf(b, "sp_str_length(%s)", s); return; }
             if (sp_streq(name, "bytesize"))   { buf_printf(b, "sp_str_bytesize(%s)", s); return; }
-            if (sp_streq(name, "empty?"))     { buf_printf(b, "(!%s || !*%s)", s, s); return; }
+            /* not `!*s`: a leading NUL is a byte like any other, and "\0abc" is
+               four bytes long. The first-byte test still short-circuits every
+               non-empty string; sp_str_byte_len runs only behind it. */
+            if (sp_streq(name, "empty?"))     { buf_printf(b, "(!%s || (!*%s && sp_str_byte_len(%s) == 0))", s, s, s); return; }
             if (sp_streq(name, "inspect"))    { buf_printf(b, "sp_str_inspect(%s)", s); return; }
             if (sp_streq(name, "+") && ac2 == 1) {
               buf_printf(b, "sp_str_concat(%s, ", s); emit_expr(c, av2[0], b); buf_puts(b, ")"); return;
@@ -22590,7 +22593,11 @@ else {
         /* a `cbinstr` return is the same borrowed buffer, but holding raw
            bytes rather than a C string: dup exactly the count the callee
            published in sp_ffi_bin_len, since strlen would stop at the first
-           NUL byte in (say) a binary digest. */
+           NUL byte in (say) a binary digest. The result is tagged BINARY --
+           declaring this return mode is the callee saying its answer is
+           bytes, which is the same thing CRuby says by handing back
+           ASCII-8BIT, and an untagged one does not == the same bytes from
+           pack or File.binread once any of them is >= 0x80. */
         int nv_bin_ret = sp_streq(nf->ret, "cbinstr");
         int nv_bin_tmp = nv_bin_ret ? ++g_tmp : 0;
         /* JSON.parse's symbolize_names: the option rides a keyword hash the
@@ -22638,7 +22645,7 @@ else {
         buf_puts(b, ")");
         if (nv_cstr_ret) buf_puts(b, ")");
         if (nv_bin_ret)
-          buf_printf(b, "; sp_str_from_bytes(_t%d, (size_t)(sp_ffi_bin_len < 0 ? 0 : sp_ffi_bin_len)); })",
+          buf_printf(b, "; sp_str_as_binary(sp_str_from_bytes(_t%d, (size_t)(sp_ffi_bin_len < 0 ? 0 : sp_ffi_bin_len))); })",
                      nv_bin_tmp);
         return;
       }
@@ -22821,10 +22828,11 @@ else {
           /* Binary-safe: build the String from the exact byte count the callee
              published in sp_ffi_bin_len, not strlen (which truncates at an
              embedded NUL). Sequence the call before reading the length -- C
-             leaves argument evaluation order unspecified -- via a temp. */
+             leaves argument evaluation order unspecified -- via a temp. Tagged
+             BINARY for the reason the `cbinstr` arm above gives. */
           int tp = ++g_tmp;
           buf_printf(b, "({ const char *_t%d = %s; "
-                        "sp_str_from_bytes(_t%d, (size_t)(sp_ffi_bin_len < 0 ? 0 : sp_ffi_bin_len)); })",
+                        "sp_str_as_binary(sp_str_from_bytes(_t%d, (size_t)(sp_ffi_bin_len < 0 ? 0 : sp_ffi_bin_len))); })",
                      tp, call_buf.p, tp);
         }
         else {
