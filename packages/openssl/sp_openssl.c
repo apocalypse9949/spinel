@@ -22,6 +22,9 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/x509v3.h>
+#include <openssl/ec.h>
+#include <openssl/bn.h>
+#include <openssl/objects.h>
 #include <string.h>
 #include <fcntl.h>
 
@@ -312,4 +315,186 @@ sp_int sp_ssl_close(sp_int h) {
   SSL_CTX_free(c->ctx);
   c->ssl = NULL; c->ctx = NULL; c->fd = -1; c->in_use = 0;
   return 0;
+}
+
+/* ---------- EC over the named prime curves ----------
+
+   The shape is the one #4221 settled on: one-shot functions over raw bytes.
+   No BN, EC::Group or EC::Point is built on the Ruby side, and -- unlike the
+   connection table above -- nothing here outlives a call. An EC key is fully
+   described by its two byte strings (the private scalar and the uncompressed
+   point), so Ruby holds those and hands them back, rather than holding a
+   handle into a table with a slot somebody has to remember to release. A key
+   abandoned mid-protocol costs nothing.
+
+   Everything below is the EC_GROUP / EC_POINT / BIGNUM API rather than
+   EC_KEY or ECDH_compute_key: those two are deprecated in OpenSSL 3.0, and
+   their replacements (EVP_PKEY_get_bn_param and friends) did not exist at
+   this file's 1.1.0 floor. The low-level three are current in 3.x and present
+   in every version this file compiles against.
+
+   Points cross the boundary in X9.62 uncompressed form, 0x04 || X || Y, which
+   is what every protocol that names raw EC keys means by "the public key" --
+   RFC 8291 Web Push, JWK's x and y halves, and WebAuthn all use it. It also
+   makes the ECDH answer a slice: the shared secret is the X coordinate, which
+   is bytes 1..flen of the encoded product point. */
+
+/* P-521, the widest curve anyone names: 66 bytes of field, 133 of point. */
+#define SP_EC_MAX_FIELD 66
+#define SP_EC_MAX_POINT (1 + 2 * SP_EC_MAX_FIELD)
+
+/* Each entry point gets its own buffer, the same rule sp_crypto.c states for
+   its digests: a caller holding the bytes of one result must not have the
+   next call clobber them. `key.public_key_bytes` and `key.dh_compute_key(x)`
+   are exactly that pair. */
+static SP_TLS char sp_ec_gen_buf[SP_EC_MAX_FIELD];
+static SP_TLS char sp_ec_pub_buf[SP_EC_MAX_POINT];
+static SP_TLS char sp_ec_dh_buf[SP_EC_MAX_FIELD];
+
+/* An empty answer plus a reason in sp_ssl_last_error; the Ruby side turns it
+   into OpenSSL::PKey::ECError. Nothing here answers a short-but-nonempty
+   string, so "empty" is unambiguously the failure. */
+static const char *sp_ec_fail(const char *what) {
+  sp_ssl_note(what);
+  sp_ffi_bin_len = 0;
+  return "";
+}
+
+static EC_GROUP *sp_ec_group(const char *curve, int *flen) {
+  int nid = OBJ_txt2nid(curve);
+  EC_GROUP *g;
+  if (nid == NID_undef) return NULL;
+  if (!(g = EC_GROUP_new_by_curve_name(nid))) return NULL;
+  *flen = (EC_GROUP_get_degree(g) + 7) / 8;
+  if (*flen <= 0 || *flen > SP_EC_MAX_FIELD) { EC_GROUP_free(g); return NULL; }
+  return g;
+}
+
+/* A private key is a scalar in [1, n-1], written field-width big-endian.
+   Out-of-range is rejected here rather than multiplied into a point that is
+   not the caller's key: d == 0 gives the point at infinity, and d >= n is a
+   silent alias for d - n. */
+static BIGNUM *sp_ec_scalar(const EC_GROUP *g, const char *priv, int flen) {
+  BIGNUM *d, *order;
+  if ((int)sp_str_byte_len(priv) != flen) return NULL;
+  if (!(d = BN_bin2bn((const unsigned char *)priv, flen, NULL))) return NULL;
+  if (!(order = BN_new())) { BN_free(d); return NULL; }
+  if (!EC_GROUP_get_order(g, order, NULL) ||
+      BN_is_zero(d) || BN_cmp(d, order) >= 0) {
+    BN_free(order); BN_clear_free(d); return NULL;
+  }
+  BN_free(order);
+  return d;
+}
+
+/* Read a peer's uncompressed point, refusing anything that is not a usable
+   public key on this curve. EC_POINT_oct2point already rejects a point off
+   the curve, and the explicit check after it is belt and braces: an ECDH
+   against an attacker-chosen off-curve point leaks the private scalar a few
+   bits at a time (the invalid-curve attack), and the whole defence is this
+   one test. Small-subgroup confinement needs no separate check on the prime
+   curves OBJ_txt2nid resolves, whose cofactor is 1 -- every on-curve point
+   other than infinity generates the full group. */
+static EC_POINT *sp_ec_peer(const EC_GROUP *g, const char *pub, int flen) {
+  EC_POINT *p;
+  size_t want = (size_t)(1 + 2 * flen);
+  if (sp_str_byte_len(pub) != want || (unsigned char)pub[0] != 0x04) return NULL;
+  if (!(p = EC_POINT_new(g))) return NULL;
+  if (!EC_POINT_oct2point(g, p, (const unsigned char *)pub, want, NULL) ||
+      !EC_POINT_is_on_curve(g, p, NULL) ||
+      EC_POINT_is_at_infinity(g, p)) {
+    EC_POINT_free(p);
+    return NULL;
+  }
+  return p;
+}
+
+/* A fresh private scalar, uniform in [1, n-1]. BN_rand_range draws from the
+   same CSPRNG the rest of libcrypto uses; the retry is for the zero it can
+   return, which is not a key. */
+const char *sp_ec_generate(const char *curve) {
+  int flen = 0;
+  EC_GROUP *g = sp_ec_group(curve, &flen);
+  BIGNUM *order = NULL, *d = NULL;
+  int ok = 0;
+
+  sp_ssl_errbuf[0] = 0;
+  if (!g) return sp_ec_fail("unknown or unsupported curve");
+  if ((order = BN_new()) && (d = BN_new()) && EC_GROUP_get_order(g, order, NULL)) {
+    for (int tries = 0; tries < 16 && !ok; tries++)
+      if (BN_rand_range(d, order) && !BN_is_zero(d)) ok = 1;
+  }
+  if (ok) ok = BN_bn2binpad(d, (unsigned char *)sp_ec_gen_buf, flen) == flen;
+
+  BN_free(order);
+  BN_clear_free(d);
+  EC_GROUP_free(g);
+  if (!ok) return sp_ec_fail("EC key generation failed");
+  sp_ffi_bin_len = flen;
+  return sp_ec_gen_buf;
+}
+
+/* dG for a private scalar d: the public half of a key the caller already
+   holds, which is why generate() answers only the scalar. */
+const char *sp_ec_public_bytes(const char *curve, const char *priv) {
+  int flen = 0;
+  EC_GROUP *g = sp_ec_group(curve, &flen);
+  BIGNUM *d = NULL;
+  EC_POINT *pub = NULL;
+  size_t n = 0;
+
+  sp_ssl_errbuf[0] = 0;
+  if (!g) return sp_ec_fail("unknown or unsupported curve");
+  if (!(d = sp_ec_scalar(g, priv, flen))) {
+    EC_GROUP_free(g);
+    return sp_ec_fail("private key is not a scalar on this curve");
+  }
+  if ((pub = EC_POINT_new(g)) && EC_POINT_mul(g, pub, d, NULL, NULL, NULL))
+    n = EC_POINT_point2oct(g, pub, POINT_CONVERSION_UNCOMPRESSED,
+                           (unsigned char *)sp_ec_pub_buf,
+                           (size_t)(1 + 2 * flen), NULL);
+
+  EC_POINT_free(pub);
+  BN_clear_free(d);
+  EC_GROUP_free(g);
+  if (n != (size_t)(1 + 2 * flen)) return sp_ec_fail("EC_POINT_mul");
+  sp_ffi_bin_len = (int)n;
+  return sp_ec_pub_buf;
+}
+
+/* ECDH: the X coordinate of d * peer, field-width. That is the raw shared
+   secret every protocol here means -- ECDH_compute_key's default KDF is the
+   identity, so this is the same answer CRuby's dh_compute_key returns. */
+const char *sp_ec_dh(const char *curve, const char *priv, const char *peer) {
+  int flen = 0;
+  EC_GROUP *g = sp_ec_group(curve, &flen);
+  BIGNUM *d = NULL;
+  EC_POINT *pt = NULL, *shared = NULL;
+  unsigned char oct[SP_EC_MAX_POINT];
+  size_t n = 0;
+
+  sp_ssl_errbuf[0] = 0;
+  if (!g) return sp_ec_fail("unknown or unsupported curve");
+  if (!(d = sp_ec_scalar(g, priv, flen))) {
+    EC_GROUP_free(g);
+    return sp_ec_fail("private key is not a scalar on this curve");
+  }
+  if (!(pt = sp_ec_peer(g, peer, flen))) {
+    BN_clear_free(d); EC_GROUP_free(g);
+    return sp_ec_fail("peer public key is not a point on this curve");
+  }
+  if ((shared = EC_POINT_new(g)) && EC_POINT_mul(g, shared, NULL, pt, d, NULL) &&
+      !EC_POINT_is_at_infinity(g, shared))
+    n = EC_POINT_point2oct(g, shared, POINT_CONVERSION_UNCOMPRESSED,
+                           oct, sizeof oct, NULL);
+
+  EC_POINT_free(shared);
+  EC_POINT_free(pt);
+  BN_clear_free(d);
+  EC_GROUP_free(g);
+  if (n != (size_t)(1 + 2 * flen)) return sp_ec_fail("ECDH failed");
+  memcpy(sp_ec_dh_buf, oct + 1, (size_t)flen);
+  OPENSSL_cleanse(oct, sizeof oct);
+  sp_ffi_bin_len = flen;
+  return sp_ec_dh_buf;
 }

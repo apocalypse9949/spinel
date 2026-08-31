@@ -1,14 +1,18 @@
-# Spinel bundled `openssl` -- the SSL half only.
+# Spinel bundled `openssl`.
 #
 # The spelling is CRuby's, deliberately: the goal is that a program written
 # against CRuby compiles here, so inventing a shorter name would be worth
 # nothing. What is missing is missing the way a subset is missing things --
-# OpenSSL::Digest, Cipher, PKey and most of X509 are not here, and a program
-# that uses them fails at COMPILE time with an unresolved call rather than at
-# run time somewhere deep.
+# OpenSSL::Cipher and most of X509 are not here, and a program that uses them
+# fails at COMPILE time with an unresolved call rather than at run time
+# somewhere deep. Digest, HMAC, KDF and PKey::EC are here; EC is a subset of
+# CRuby's in a second sense, spelled out in openssl/pkey.rb -- it keeps
+# CRuby's method names but trades BN, EC::Group and EC::Point for the raw
+# bytes every protocol that names an EC key means by them.
 #
-# Spinel implements no TLS. sp_openssl.c is glue over the system libssl, and
-# the trust anchors are the operating system's; nothing is bundled.
+# Spinel implements neither TLS nor any of the arithmetic below it.
+# sp_openssl.c is glue over the system libssl and libcrypto, and the trust
+# anchors are the operating system's; nothing is bundled.
 #
 # SSLSocket is not an IO, exactly as in CRuby: it is an ordinary object that
 # answers #to_io, which is why IO.select had to learn that protocol. The
@@ -16,6 +20,8 @@
 # is handed to a garbage-collected world.
 require "openssl/buffering"
 require "openssl/digest"
+require "openssl/kdf"
+require "openssl/pkey"
 
 module OpenSSL
   module Native
@@ -33,6 +39,12 @@ module OpenSSL
     native_func :read_nb,      [:int, :int],          :string, "sp_ssl_read_nb"
     native_func :want,         [],                    :int,    "sp_ssl_want"
     native_func :write_nb,     [:int, :string, :int], :int,    "sp_ssl_write_nb"
+
+    # EC, over the same object. Bytes in, bytes out, and an empty answer
+    # means the reason is in last_error -- see openssl/pkey.rb.
+    native_func :ec_generate,     [:string],                   :cbinstr, "sp_ec_generate"
+    native_func :ec_public_bytes, [:string, :string],          :cbinstr, "sp_ec_public_bytes"
+    native_func :ec_dh,           [:string, :string, :string], :cbinstr, "sp_ec_dh"
     ffi_lib "ssl"
     ffi_lib "crypto"
   end
