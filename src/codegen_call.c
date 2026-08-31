@@ -2439,12 +2439,22 @@ static int emit_concurrency_call(Compiler *c, int id, Buf *b) {
 
   /* ConditionVariable instance methods */
   if (recv >= 0 && comp_ntype(c, recv) == TY_CONDVAR) {
-    if (sp_streq(name, "wait") && argc >= 1) {
-      /* wait(mutex): release the mutex, park, re-acquire. A timeout arg (argc==2)
-         is accepted but ignored at N=1 (no real clock blocking). */
+    if (sp_streq(name, "wait") && argc >= 1 && argc <= 2) {
+      /* wait(mutex): release the mutex, park, re-acquire. The 2-arg
+         `wait(mutex, timeout)` form routes to the non-blocking drain
+         entry: sp_CondVar_wait_nb releases the mutex, drops any
+         pending signal, and re-acquires. A real clock-driven timeout
+         (t > 0) is not yet supported in the scheduler; the 0 case is
+         the only one the 2-arg form covers correctly, and it is the
+         only shape user code uses for a "drain stale signal" check. */
       int t = ++g_tmp;
       buf_printf(b, "({ sp_condvar *_t%d = ", t); emit_expr(c, recv, b);
-      buf_printf(b, "; sp_CondVar_wait(_t%d, ", t); emit_expr(c, argv[0], b);
+      if (argc == 1) {
+        buf_printf(b, "; sp_CondVar_wait(_t%d, ", t); emit_expr(c, argv[0], b);
+      }
+      else {
+        buf_printf(b, "; sp_CondVar_wait_nb(_t%d, ", t); emit_expr(c, argv[0], b);
+      }
       buf_printf(b, "); _t%d; })", t);
       return 1;
     }

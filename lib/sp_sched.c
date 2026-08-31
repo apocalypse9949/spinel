@@ -1586,6 +1586,23 @@ void sp_CondVar_wait(sp_condvar *cv, sp_mutex *m) {
   sp_Mutex_lock(m);   /* re-acquire (may block again on the mutex) */
 }
 
+/* CRuby's `wait(mutex, 0)` and `wait(mutex, t)` for small/zero timeouts: the
+   codegen routes a 2-arg call here so the call returns without parking.
+   Releases the mutex, drops any pending signal, re-acquires the mutex.
+   A non-zero timeout that wants a real clock-driven wakeup is not yet
+   supported; use this for the timeout=0 / "drain any stale signal" case. */
+void sp_CondVar_wait_nb(sp_condvar *cv, sp_mutex *m) {
+  SCHED_LOCK();
+  if (m->owner != g_current) {
+    SCHED_UNLOCK();
+    sp_raise_cls("ThreadError", "Attempt to unlock a mutex which is not locked");
+  }
+  m->owner = sp_sched_wake_one(&m->waiters);   /* hand off the mutex, or NULL */
+  sp_sched_wake_one(&cv->waiters);             /* drain a pending signal if any */
+  SCHED_UNLOCK();
+  sp_Mutex_lock(m);
+}
+
 void sp_CondVar_signal(sp_condvar *cv)    { SCHED_LOCK(); sp_sched_wake_one(&cv->waiters);            SCHED_UNLOCK(); }
 void sp_CondVar_broadcast(sp_condvar *cv) { SCHED_LOCK(); while (sp_sched_wake_one(&cv->waiters)) { }  SCHED_UNLOCK(); }
 

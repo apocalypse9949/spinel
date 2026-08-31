@@ -200,6 +200,7 @@ typedef struct sp_condvar {
 
 sp_condvar *sp_CondVar_new(void);
 void        sp_CondVar_wait(sp_condvar *cv, sp_mutex *m);  /* release m, park, re-acquire m */
+void        sp_CondVar_wait_nb(sp_condvar *cv, sp_mutex *m);  /* release m, drain a pending signal, re-acquire m; the 2-arg #wait path */
 void        sp_CondVar_signal(sp_condvar *cv);             /* #signal */
 void        sp_CondVar_broadcast(sp_condvar *cv);          /* #broadcast */
 
