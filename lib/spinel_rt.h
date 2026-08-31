@@ -6433,6 +6433,12 @@ static sp_RbVal sp_poly_delete_key(sp_RbVal recv, sp_RbVal key) {
         const char *r = sp_StrArray_delete((sp_StrArray *)recv.v.p, key.v.s);
         return r ? sp_box_str(r) : sp_box_nil();
       }
+      case SP_BUILTIN_FLT_ARRAY: {
+        if (key.tag != SP_TAG_FLT && key.tag != SP_TAG_INT) return sp_box_nil();
+        sp_float r = sp_FloatArray_delete((sp_FloatArray *)recv.v.p,
+                                          key.tag == SP_TAG_FLT ? key.v.f : (sp_float)key.v.i);
+        return sp_float_is_nil(r) ? sp_box_nil() : sp_box_float(r);  /* the element, not the key: -0.0 differs */
+      }
       default: break;
     }
   }

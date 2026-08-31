@@ -837,7 +837,7 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     }
     /* index returns nil on a miss -> poly (int-or-nil) */
     if ((sp_streq(name, "index") || sp_streq(name, "find_index") || sp_streq(name, "rindex")) &&
-        (rt == TY_INT_ARRAY || rt == TY_STR_ARRAY)) { *out = TY_POLY; return 1; }
+        (rt == TY_INT_ARRAY || rt == TY_STR_ARRAY || rt == TY_FLOAT_ARRAY)) { *out = TY_POLY; return 1; }
     if (sp_streq(name, "length") || sp_streq(name, "size") ||
         sp_streq(name, "count") || sp_streq(name, "index") || sp_streq(name, "find_index")) { *out = TY_INT; return 1; }
     if (sp_streq(name, "sum")) {

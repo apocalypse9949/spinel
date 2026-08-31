@@ -3069,7 +3069,16 @@ else {
         buf_printf(b, "sp_%sArray_delete_at(", k); emit_expr(c, recv, b); buf_puts(b, ", "); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
         return 1;
       }
-      if (sp_streq(name, "delete") && argc == 1 && (rt == TY_INT_ARRAY || rt == TY_STR_ARRAY)) {
+      if (sp_streq(name, "delete") && argc == 1 &&
+          (rt == TY_INT_ARRAY || rt == TY_STR_ARRAY || rt == TY_FLOAT_ARRAY)) {
+        /* A Float receiver classifies its needle here (the delete arm's form
+           of elem_mismatch): only an Integer or Float compares. A Rational or
+           a bare {} needle broke the C build inside emit_float_expr, and a
+           boxed needle rides the tag-guarded helper instead of a lenient
+           to-f coercion. Bignum, Rational and Complex miss where CRuby's ==
+           can match -- the Int arm fails the C build on those same shapes. */
+        int df_boxed = rt == TY_FLOAT_ARRAY && (a0 == TY_POLY || a0 == TY_UNKNOWN);
+        int df_never = rt == TY_FLOAT_ARRAY && !df_boxed && a0 != TY_INT && a0 != TY_FLOAT;
         int dblk = nt_ref(nt, id, "block");
         if (dblk >= 0 && nt_type(nt, dblk) && sp_streq(nt_type(nt, dblk), "BlockNode")) {
           int dbody = nt_ref(nt, dblk, "body");
@@ -3078,7 +3087,7 @@ else {
             unsupported_feature(c, id, "Array#delete of a user object defining == from a typed Array");
             return 0;
           }
-          if (dbn >= 1 && value_kind_misses(c, argv[0], ty_array_elem(rt))) {
+          if (dbn >= 1 && (df_never || value_kind_misses(c, argv[0], ty_array_elem(rt)))) {
             /* nothing to delete: the block, handed the value, supplies the answer */
             const char *dp0 = block_param_name(c, dblk, 0);
             buf_puts(b, "({ (void)("); emit_expr(c, recv, b); buf_puts(b, "); ");
@@ -3094,6 +3103,12 @@ else {
               emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b);
               buf_printf(b, "); _t%d != SP_INT_NIL ? sp_box_int(_t%d) : ", tdr, tdr);
             }
+            else if (rt == TY_FLOAT_ARRAY) {
+              buf_printf(b, "({ sp_float _t%d = sp_FloatArray_delete%s(", tdr, df_boxed ? "_key" : "");
+              emit_expr(c, recv, b); buf_puts(b, ", ");
+              if (df_boxed) emit_boxed(c, argv[0], b); else emit_float_expr(c, argv[0], b);
+              buf_printf(b, "); !sp_float_is_nil(_t%d) ? sp_box_float(_t%d) : ", tdr, tdr);
+            }
             else {
               buf_printf(b, "({ const char *_t%d = sp_StrArray_delete(", tdr);
               emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b);
@@ -3108,12 +3123,16 @@ else {
           unsupported_feature(c, id, "Array#delete of a user object defining == from a typed Array");
           return 0;
         }
-        if (value_kind_misses(c, argv[0], ty_array_elem(rt))) {
+        if (df_never || value_kind_misses(c, argv[0], ty_array_elem(rt))) {
           buf_puts(b, "({ (void)("); emit_expr(c, recv, b); buf_puts(b, "); (void)("); emit_expr(c, argv[0], b);
           buf_printf(b, "); %s; })", rt == TY_INT_ARRAY ? "SP_INT_NIL" : rt == TY_STR_ARRAY ? "(const char *)0" : "sp_float_nil()");
           return 1;
         }
-        buf_printf(b, "sp_%sArray_delete(", k); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        buf_printf(b, "sp_%sArray_delete%s(", k, df_boxed ? "_key" : ""); emit_expr(c, recv, b); buf_puts(b, ", ");
+        if (df_boxed) emit_boxed(c, argv[0], b);
+        else if (rt == TY_FLOAT_ARRAY) emit_float_expr(c, argv[0], b);
+        else emit_expr(c, argv[0], b);
+        buf_puts(b, ")");
         return 1;
       }
       if (sp_streq(name, "tally") && argc == 0) {
@@ -3577,7 +3596,8 @@ else {
       if (argc == 1 && rt == TY_STR_ARRAY && a0 != TY_STRING && a0 != TY_UNKNOWN && a0 != TY_POLY) elem_mismatch = 1;
       if (argc == 1 && (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY) &&
           a0 != TY_INT && a0 != TY_FLOAT && a0 != TY_UNKNOWN && a0 != TY_POLY) elem_mismatch = 1;
-      if ((sp_streq(name, "index") || sp_streq(name, "find_index") || sp_streq(name, "rindex")) && argc == 1 && (rt == TY_INT_ARRAY || rt == TY_STR_ARRAY)) {
+      if ((sp_streq(name, "index") || sp_streq(name, "find_index") || sp_streq(name, "rindex")) && argc == 1 &&
+          (rt == TY_INT_ARRAY || rt == TY_STR_ARRAY || rt == TY_FLOAT_ARRAY)) {
         if (elem_mismatch) {
           buf_puts(b, "((void)("); emit_expr(c, recv, b);
           buf_puts(b, "), (void)("); emit_expr(c, argv[0], b); buf_puts(b, "), sp_box_nil())");
@@ -3594,9 +3614,18 @@ else {
           buf_puts(b, "); sp_box_nil(); })");
           return 1;
         }
+        if (rt == TY_FLOAT_ARRAY && (a0 == TY_POLY || a0 == TY_UNKNOWN)) {
+          /* boxed needle: the tag-guarded helper compares Float and Integer
+             tags and misses every other, where a to-f coercion made false hits */
+          buf_printf(b, "sp_FloatArray_%s(", sp_streq(name, "rindex") ? "rindex_key" : "index_key");
+          emit_expr(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+          return 1;
+        }
         buf_printf(b, "sp_%sArray_%s(", k, fn);
         emit_expr(c, recv, b); buf_puts(b, ", ");
-        if (sp_streq(k, "Int")) emit_int_expr(c, argv[0], b); else emit_expr(c, argv[0], b);
+        if (rt == TY_INT_ARRAY) emit_int_expr(c, argv[0], b);
+        else if (rt == TY_FLOAT_ARRAY) emit_float_expr(c, argv[0], b);
+        else emit_expr(c, argv[0], b);
         buf_puts(b, ")");
         return 1;
       }
