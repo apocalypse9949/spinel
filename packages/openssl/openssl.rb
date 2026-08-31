@@ -3,12 +3,14 @@
 # The spelling is CRuby's, deliberately: the goal is that a program written
 # against CRuby compiles here, so inventing a shorter name would be worth
 # nothing. What is missing is missing the way a subset is missing things --
-# OpenSSL::Cipher and most of X509 are not here, and a program that uses them
-# fails at COMPILE time with an unresolved call rather than at run time
-# somewhere deep. Digest, HMAC, KDF and PKey::EC are here; EC is a subset of
-# CRuby's in a second sense, spelled out in openssl/pkey.rb -- it keeps
+# most of X509 is not here, and a program that uses it fails at COMPILE time
+# with an unresolved call rather than at run time somewhere deep. Digest,
+# HMAC, KDF, PKey::EC and Cipher are here, and the last two are subsets of
+# CRuby's in a second sense, each spelled out in its own file: EC keeps
 # CRuby's method names but trades BN, EC::Group and EC::Point for the raw
-# bytes every protocol that names an EC key means by them.
+# bytes every protocol that names an EC key means by them, and Cipher keeps
+# CRuby's object while buffering rather than streaming, over aes-128-gcm and
+# aes-256-gcm only.
 #
 # Spinel implements neither TLS nor any of the arithmetic below it.
 # sp_openssl.c is glue over the system libssl and libcrypto, and the trust
@@ -20,6 +22,7 @@
 # is handed to a garbage-collected world.
 require "openssl/buffering"
 require "openssl/digest"
+require "openssl/cipher"
 require "openssl/kdf"
 require "openssl/pkey"
 
@@ -45,6 +48,15 @@ module OpenSSL
     native_func :ec_generate,     [:string],                   :cbinstr, "sp_ec_generate"
     native_func :ec_public_bytes, [:string, :string],          :cbinstr, "sp_ec_public_bytes"
     native_func :ec_dh,           [:string, :string, :string], :cbinstr, "sp_ec_dh"
+
+    # AES-GCM, one shot. The whole operation in one call, because the Ruby
+    # Cipher over it holds the state -- see openssl/cipher.rb. Encrypt answers
+    # ciphertext || tag; both answer "" with the reason in last_error, since an
+    # empty result is legitimate here (the plaintext of an empty message).
+    native_func :aes_gcm_encrypt, [:string, :string, :string, :string, :string],
+                :string, "sp_aes_gcm_encrypt"
+    native_func :aes_gcm_decrypt, [:string, :string, :string, :string, :string, :string],
+                :string, "sp_aes_gcm_decrypt"
     ffi_lib "ssl"
     ffi_lib "crypto"
   end

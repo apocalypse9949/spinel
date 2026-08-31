@@ -25,6 +25,7 @@
 #include <openssl/ec.h>
 #include <openssl/bn.h>
 #include <openssl/objects.h>
+#include <openssl/evp.h>
 #include <string.h>
 #include <fcntl.h>
 
@@ -60,7 +61,11 @@ typedef struct {
 } sp_ssl_conn;
 
 static sp_ssl_conn sp_ssl_tab[SP_SSL_MAX];
-static char sp_ssl_errbuf[512];
+/* Per-thread, like sp_ssl_want_state below: this is a "what happened on MY
+   last call" slot, and spinel runs native calls on parallel workers. As a
+   process-global it let one thread's success clear another's failure -- and
+   two threads doing TLS could already read each other's reasons. */
+static SP_TLS char sp_ssl_errbuf[512];
 static char *sp_ssl_rdbuf;
 
 /* Record the most recent failure so the Ruby side can raise with a reason
@@ -497,4 +502,153 @@ const char *sp_ec_dh(const char *curve, const char *priv, const char *peer) {
   OPENSSL_cleanse(oct, sizeof oct);
   sp_ffi_bin_len = flen;
   return sp_ec_dh_buf;
+}
+
+/* ---------- AES-GCM, one shot ----------
+
+   Stateless by construction, which is the whole design (#4221): the Ruby
+   Cipher above this holds the key, iv, aad and the buffered plaintext as
+   ordinary ivars, and calls in here exactly once, at #final, when every input
+   exists at the same moment. Nothing on this side survives the call, so there
+   is no context to free and an abandoned Cipher -- an exception mid-stream, a
+   decrypt raising on a bad tag from attacker input -- costs nothing. It is the
+   same property the EC surface has, arrived at the same way.
+
+   Both entry points clear the shared error slot on the way in and leave a
+   reason in it on the way out; the Ruby side raises on a non-empty
+   last_error rather than on an empty result, because an empty result is a
+   legitimate answer here (the plaintext of an empty message).
+
+   The tag rides at the END of the encrypt result, ciphertext || tag, so one
+   return value carries both and the Ruby side splits at -16. GCM's tag is
+   always 16 bytes here; CRuby can be asked for a shorter one, and truncated
+   tags weaken the authentication for no benefit this package has a use for. */
+
+#define SP_GCM_TAG 16
+
+/* aes-128-gcm / aes-256-gcm only, by name, per #4221: a mode that has not been
+   run against vectors must not start working by accident because EVP knows it.
+   The Ruby side refuses other names before reaching here; this is the second
+   half of the same gate, for a caller that arrives another way. */
+static const EVP_CIPHER *sp_gcm_by_name(const char *name) {
+  /* strcmp, not a length-aware compare: a cipher name is a C string by
+     construction -- it has no embedded NUL and the literals here have none. */
+  if (strcmp(name, "aes-128-gcm") == 0) return EVP_aes_128_gcm();
+  if (strcmp(name, "aes-256-gcm") == 0) return EVP_aes_256_gcm();
+  return NULL;
+}
+
+/* Shared setup: the cipher, the key and an IV of any length GCM accepts.
+   EVP_CTRL_AEAD_SET_IVLEN is set unconditionally rather than only for a
+   non-default length -- it is free, and it means a 12-byte IV takes the same
+   path as any other rather than a second one that is never tested. */
+static EVP_CIPHER_CTX *sp_gcm_begin(const char *name, const char *key,
+                                    const char *iv, int enc) {
+  const EVP_CIPHER *c = sp_gcm_by_name(name);
+  EVP_CIPHER_CTX *ctx;
+  if (!c) { sp_ssl_note("unsupported cipher"); return NULL; }
+  if ((int)sp_str_byte_len(key) != EVP_CIPHER_key_length(c)) {
+    sp_ssl_note("key is not the cipher's key length");
+    return NULL;
+  }
+  if (sp_str_byte_len(iv) == 0) { sp_ssl_note("iv must not be empty"); return NULL; }
+  if (!(ctx = EVP_CIPHER_CTX_new())) { sp_ssl_note("EVP_CIPHER_CTX_new"); return NULL; }
+  if (!EVP_CipherInit_ex(ctx, c, NULL, NULL, NULL, enc) ||
+      !EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN,
+                           (int)sp_str_byte_len(iv), NULL) ||
+      !EVP_CipherInit_ex(ctx, NULL, NULL, (const unsigned char *)key,
+                         (const unsigned char *)iv, enc)) {
+    sp_ssl_note("EVP_CipherInit_ex");
+    EVP_CIPHER_CTX_free(ctx);
+    return NULL;
+  }
+  return ctx;
+}
+
+/* Additional authenticated data: covered by the tag, absent from the output.
+   An empty aad is not "no aad" -- it is an aad of zero bytes, and GCM treats
+   the two identically, so no branch is needed. */
+static int sp_gcm_aad(EVP_CIPHER_CTX *ctx, const char *aad) {
+  size_t n = sp_str_byte_len(aad);
+  int out = 0;
+  if (n == 0) return 1;
+  return EVP_CipherUpdate(ctx, NULL, &out, (const unsigned char *)aad, (int)n);
+}
+
+/* ciphertext || tag. GCM is a stream mode, so the ciphertext is exactly as
+   long as the plaintext and the allocation is known before any work. */
+const char *sp_aes_gcm_encrypt(const char *name, const char *key, const char *iv,
+                               const char *aad, const char *plain) {
+  size_t pn = sp_str_byte_len(plain);
+  EVP_CIPHER_CTX *ctx;
+  char *out;
+  int n1 = 0, n2 = 0, ok;
+
+  sp_ssl_errbuf[0] = 0;
+  if (!(ctx = sp_gcm_begin(name, key, iv, 1))) return sp_str_from_bytes("", 0);
+
+  out = sp_str_alloc(pn + SP_GCM_TAG);
+  ok = sp_gcm_aad(ctx, aad) &&
+       EVP_CipherUpdate(ctx, (unsigned char *)out, &n1,
+                        (const unsigned char *)plain, (int)pn) &&
+       EVP_CipherFinal_ex(ctx, (unsigned char *)out + n1, &n2) &&
+       EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_GET_TAG, SP_GCM_TAG,
+                           (unsigned char *)out + pn);
+  EVP_CIPHER_CTX_free(ctx);
+  if (!ok || (size_t)(n1 + n2) != pn) {
+    sp_ssl_note("AES-GCM encrypt failed");
+    return sp_str_from_bytes("", 0);
+  }
+  out[pn + SP_GCM_TAG] = 0;
+  sp_str_set_len(out, pn + SP_GCM_TAG);
+  return sp_str_as_binary(out);
+}
+
+/* On success, 0x01 || plaintext; on failure, an empty string with the reason in
+   last_error. A tag that does not verify is a failure like any other and must
+   not answer plaintext: EVP_CipherFinal_ex performs that check, which is why
+   the tag is set before it and the result of that call is not ignored.
+
+   THE STATUS BYTE IS WHY THIS DOES NOT ANSWER THE PLAINTEXT PLAINLY. An empty
+   string is a legitimate plaintext -- the message of zero bytes -- so "empty"
+   cannot also mean "forged", and a verdict read from a separate call is a
+   verdict that can be wrong: another thread's success can clear the error slot
+   between the two, and a forged message then arrives as valid empty plaintext.
+   Making the answer carry its own verdict removes the window rather than
+   narrowing it, and one byte is a cheap price for an authentication result
+   that cannot be read out of order. (The encrypt side needs no such byte: its
+   answer always carries a 16-byte tag, so empty is unambiguous there.) */
+const char *sp_aes_gcm_decrypt(const char *name, const char *key, const char *iv,
+                               const char *aad, const char *ct, const char *tag) {
+  size_t cn = sp_str_byte_len(ct);
+  EVP_CIPHER_CTX *ctx;
+  char *out;
+  int n1 = 0, n2 = 0, ok;
+
+  sp_ssl_errbuf[0] = 0;
+  if (sp_str_byte_len(tag) != SP_GCM_TAG) {
+    sp_ssl_note("auth tag must be 16 bytes");
+    return sp_str_from_bytes("", 0);
+  }
+  if (!(ctx = sp_gcm_begin(name, key, iv, 0))) return sp_str_from_bytes("", 0);
+
+  out = sp_str_alloc(cn + 1);
+  out[0] = 0x01;
+  ok = sp_gcm_aad(ctx, aad) &&
+       EVP_CipherUpdate(ctx, (unsigned char *)out + 1, &n1,
+                        (const unsigned char *)ct, (int)cn) &&
+       EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG, SP_GCM_TAG,
+                           (void *)tag) &&
+       EVP_CipherFinal_ex(ctx, (unsigned char *)out + 1 + n1, &n2);
+  EVP_CIPHER_CTX_free(ctx);
+  if (!ok || (size_t)(n1 + n2) != cn) {
+    /* Never hand back a partial plaintext from a message that did not
+       authenticate, not even to a caller that would discard it. */
+    OPENSSL_cleanse(out, cn + 1);
+    sp_ssl_note("AES-GCM decrypt failed: auth tag did not verify");
+    return sp_str_from_bytes("", 0);
+  }
+  out[cn + 1] = 0;
+  sp_str_set_len(out, cn + 1);
+  return sp_str_as_binary(out);
 }
