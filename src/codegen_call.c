@@ -407,15 +407,24 @@ static int emit_strchar_cmp(Compiler *c, int recv, int arg, int eq, Buf *b) {
   int ok = (str_index1(c, recv, &sr, &si) && single_byte_lit(c, arg, &ch)) ||
            (str_index1(c, arg, &sr, &si) && single_byte_lit(c, recv, &ch));
   if (!ok) return 0;
-  /* A negative literal index would read out of bounds; only fold when the
-     index can't be a negative literal. */
-  const char *ity = nt_type(c->nt, si);
-  if (ity && sp_streq(ity, "IntegerNode") && nt_int(c->nt, si, "value", 0) < 0) return 0;
-  buf_puts(b, "((unsigned char)(");
+  /* The byte at offset i is the CHARACTER at index i only while every
+     character before i is one byte wide, so the raw load is guarded by the
+     receiver's fixed-width bit (an ASCII-only or binary string). Without the
+     guard `"說*.rb"[1] == "*"` compared the second byte of the first
+     character and answered false (#4239). A string that is not fixed width, a
+     negative index (which counts from the end), and an index past the end
+     (nil, equal to nothing) all take the general path, which is what this
+     compiled to before the fold existed. */
+  int ts = ++g_tmp, ti = ++g_tmp, tb = ++g_tmp;
+  buf_printf(b, "({ const char *_t%d = ", ts);
   if (!emit_strbuf_read_ref(c, sr, b)) emit_expr(c, sr, b);
-  buf_puts(b, ")[(sp_int)(");
+  buf_printf(b, "; sp_int _t%d = (sp_int)(", ti);
   emit_expr(c, si, b);
-  buf_printf(b, ")] %s %u)", eq ? "==" : "!=", (unsigned)ch);
+  buf_printf(b, "); size_t _t%d; %s(_t%d >= 0 && sp_str_fixed_width(_t%d, &_t%d)"
+                " ? (_t%d < (sp_int)_t%d && (unsigned char)_t%d[_t%d] == %u)"
+                " : sp_str_eq_cstr(sp_str_char_at_or_nil(_t%d, _t%d), \"\\%03o\")); })",
+             tb, eq ? "" : "!", ti, ts, tb, ti, tb, ts, ti, (unsigned)ch,
+             ts, ti, (unsigned)ch);
   return 1;
 }
 
