@@ -17387,7 +17387,8 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        sp_streq(name, "eof?") || sp_streq(name, "closed?") || sp_streq(name, "path") ||
        sp_streq(name, "tty?") || sp_streq(name, "isatty") ||
        (sp_streq(name, "winsize") && sp_feature_enabled("io/console")) ||
-       sp_streq(name, "readlines") || sp_streq(name, "rewind") || sp_streq(name, "sync"))) {
+       sp_streq(name, "readlines") || sp_streq(name, "rewind") ||
+       sp_streq(name, "sync") || sp_streq(name, "sync="))) {
     int iocand = 0;
     for (int k = 0; k < c->nclasses && !iocand; k++)
       if (comp_method_in_chain(c, k, name, NULL) >= 0 ||
@@ -17443,7 +17444,17 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       else if (sp_streq(name, "path")) buf_printf(b, "sp_File_path(_t%d); })", tio2);
       else if (sp_streq(name, "readlines")) buf_printf(b, "sp_File_readlines(_t%d); })", tio2);
       else if (sp_streq(name, "rewind")) buf_printf(b, "sp_File_rewind(_t%d); })", tio2);
-      else if (sp_streq(name, "sync")) buf_printf(b, "((void)_t%d, TRUE); })", tio2);
+      /* the same answers the typed-receiver arms give (#2792 semantics):
+         sync reads the handle kind, sync= flushes on a truthy value and
+         answers it (#4229) */
+      else if (sp_streq(name, "sync") && argc == 0)
+        buf_printf(b, "(_t%d && _t%d->is_sock ? (sp_bool)1 : (sp_bool)0); })", tio2, tio2);
+      else if (sp_streq(name, "sync=") && argc >= 1) {
+        int ts3 = ++g_tmp;
+        buf_printf(b, "sp_bool _t%d = sp_poly_truthy(", ts3);
+        emit_boxed(c, argv[0], b);
+        buf_printf(b, "); if (_t%d) sp_File_flush(_t%d); _t%d; })", ts3, tio2, ts3);
+      }
       /* read(n) reads UP TO n bytes; dropping the count read to EOF, which on
          a socket with a live peer never comes -- `r.read(5)` hung forever. */
       else if (sp_streq(name, "read") && argc >= 1) {

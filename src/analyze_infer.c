@@ -4588,7 +4588,8 @@ else {
       if (sp_streq(name, "resume") || sp_streq(name, "value") || sp_streq(name, "join"))
         return an_poly_concrete(c, name, TY_POLY);
       if (sp_streq(name, "alive?") || sp_streq(name, "dead?") || sp_streq(name, "closed?") ||
-          sp_streq(name, "eof?") || sp_streq(name, "tty?") || sp_streq(name, "isatty"))
+          sp_streq(name, "eof?") || sp_streq(name, "tty?") || sp_streq(name, "isatty") ||
+          sp_streq(name, "sync") || sp_streq(name, "sync="))
         return an_poly_concrete(c, name, TY_BOOL);
       /* IO#winsize on a poly-carried handle: [rows, cols], same as the TY_IO
          arm. Without this the call falls through to a plain poly result and the
