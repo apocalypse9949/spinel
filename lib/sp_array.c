@@ -411,6 +411,14 @@ sp_float sp_FloatArray_sample(sp_FloatArray*a){SP_GC_ROOT(a);if(a->len<=0)return
 /* a NaN is not == to itself, but CRuby's identity fallback still finds the
    very same NaN in a container (#3650) */
 sp_bool sp_FloatArray_include(sp_FloatArray*a,sp_float v){if(!a)return FALSE;for(sp_int i=0;i<a->len;i++){if(a->data[i]==v)return TRUE;if(v!=v&&a->data[i]!=a->data[i]&&memcmp(&a->data[i],&v,sizeof v)==0)return TRUE;}return FALSE;}
+/* index/rindex/delete match the way sp_FloatArray_include just above does:
+   == first, then the bit-pattern fallback so the Float::NAN constant finds
+   itself (a computed NaN with the same bits over-matches identically).
+   delete answers the deleted ELEMENT, last match, as CRuby does -- -0.0
+   shows the difference -- and nil (an e never reassigned) when absent. */
+sp_int sp_FloatArray_index(sp_FloatArray*a,sp_float v){if(!a)return -1;for(sp_int i=0;i<a->len;i++){sp_float x=a->data[i];if(x==v||(v!=v&&x!=x&&memcmp(&x,&v,sizeof v)==0))return i;}return -1;}
+sp_int sp_FloatArray_rindex(sp_FloatArray*a,sp_float v){if(!a)return -1;for(sp_int i=a->len-1;i>=0;i--){sp_float x=a->data[i];if(x==v||(v!=v&&x!=x&&memcmp(&x,&v,sizeof v)==0))return i;}return -1;}
+sp_float sp_FloatArray_delete(sp_FloatArray*a,sp_float v){SP_GC_ROOT(a);if(!a)return sp_float_nil();if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_FLT_ARRAY);return sp_float_nil();}sp_int w=0;sp_float e=sp_float_nil();for(sp_int i=0;i<a->len;i++){sp_float x=a->data[i];if(x==v||(v!=v&&x!=x&&memcmp(&x,&v,sizeof v)==0))e=x;else{a->data[w]=x;w++;}}a->len=w;return e;}
 sp_FloatArray*sp_FloatArray_intersect(sp_FloatArray*a,sp_FloatArray*b){SP_GC_ROOT(a);SP_GC_ROOT(b);sp_FloatArray*r=sp_FloatArray_new();if(!a||!b)return r;for(sp_int i=0;i<a->len;i++){sp_float v=a->data[i];if(sp_FloatArray_include(b,v)&&!sp_FloatArray_include(r,v))sp_FloatArray_push(r,v);}return r;}
 sp_bool sp_FloatArray_intersect_p(sp_FloatArray*a,sp_FloatArray*b){SP_GC_ROOT(a);SP_GC_ROOT(b);if(!a||!b)return 0;for(sp_int i=0;i<a->len;i++)if(sp_FloatArray_include(b,a->data[i]))return 1;return 0;}
 sp_FloatArray*sp_FloatArray_union(sp_FloatArray*a,sp_FloatArray*b){SP_GC_ROOT(a);SP_GC_ROOT(b);sp_FloatArray*r=sp_FloatArray_new();if(a)for(sp_int i=0;i<a->len;i++){sp_float v=a->data[i];if(!sp_FloatArray_include(r,v))sp_FloatArray_push(r,v);}if(b){for(sp_int i=0;i<b->len;i++){sp_float v=b->data[i];if(!sp_FloatArray_include(r,v))sp_FloatArray_push(r,v);}}return r;}
@@ -586,6 +594,16 @@ sp_RbVal sp_StrArray_index_poly(sp_StrArray *a, const char *v)     {SP_GC_ROOT(a
 sp_RbVal sp_StrArray_rindex_poly(sp_StrArray *a, const char *v)    {SP_GC_ROOT(a);SP_GC_ROOT_STR(v); sp_int n = sp_StrArray_rindex(a, v);  return n < 0 ? sp_box_nil() : sp_box_int(n); }
 sp_int sp_IntArray_index_opt(sp_IntArray *a, sp_int v)           {SP_GC_ROOT(a); sp_int n = sp_IntArray_index(a, v);   return n < 0 ? SP_INT_NIL : n; }
 sp_int sp_IntArray_rindex_opt(sp_IntArray *a, sp_int v)          {SP_GC_ROOT(a); sp_int n = sp_IntArray_rindex(a, v);  return n < 0 ? SP_INT_NIL : n; }
+sp_RbVal sp_FloatArray_index_poly(sp_FloatArray *a, sp_float v)   {SP_GC_ROOT(a); sp_int n = sp_FloatArray_index(a, v);  return n < 0 ? sp_box_nil() : sp_box_int(n); }
+sp_RbVal sp_FloatArray_rindex_poly(sp_FloatArray *a, sp_float v)  {SP_GC_ROOT(a); sp_int n = sp_FloatArray_rindex(a, v); return n < 0 ? sp_box_nil() : sp_box_int(n); }
+/* A boxed needle compares only for a Float or Integer tag; every other tag
+   misses, never riding a to-f coercion that would have parsed a String or
+   interned a Symbol into a false hit -- and delete into a lost element.
+   Bignum, Rational and Complex miss too, where CRuby's == can match: the
+   family-wide trade, the Int arm fails the C build on the same shapes. */
+sp_RbVal sp_FloatArray_index_key(sp_FloatArray *a, sp_RbVal v)  {SP_GC_ROOT(a); if (v.tag == SP_TAG_FLT) return sp_FloatArray_index_poly(a, v.v.f); if (v.tag == SP_TAG_INT) return sp_FloatArray_index_poly(a, (sp_float)v.v.i); return sp_box_nil(); }
+sp_RbVal sp_FloatArray_rindex_key(sp_FloatArray *a, sp_RbVal v) {SP_GC_ROOT(a); if (v.tag == SP_TAG_FLT) return sp_FloatArray_rindex_poly(a, v.v.f); if (v.tag == SP_TAG_INT) return sp_FloatArray_rindex_poly(a, (sp_float)v.v.i); return sp_box_nil(); }
+sp_float sp_FloatArray_delete_key(sp_FloatArray *a, sp_RbVal v) {SP_GC_ROOT(a); if (v.tag == SP_TAG_FLT) return sp_FloatArray_delete(a, v.v.f); if (v.tag == SP_TAG_INT) return sp_FloatArray_delete(a, (sp_float)v.v.i); return sp_float_nil(); }
 const int64_t *sp_IntArray_ffi_data(sp_IntArray *a) { return a ? (const int64_t *)(a->data + a->start) : (const int64_t *)0; }
 const double  *sp_FloatArray_ffi_data(sp_FloatArray *a) { return a ? (const double *)a->data : (const double *)0; }
 sp_IntArray *sp_IntArray_concat(sp_IntArray *a, sp_IntArray *b) { SP_GC_ROOT(a); SP_GC_ROOT(b); sp_IntArray *r = sp_IntArray_new(); SP_GC_ROOT(r); if (a) for (sp_int i = 0; i < a->len; i++) sp_IntArray_push(r, sp_IntArray_get(a, i)); if (b) for (sp_int i = 0; i < b->len; i++) sp_IntArray_push(r, sp_IntArray_get(b, i)); return r; }
