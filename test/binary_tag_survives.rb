@@ -37,6 +37,11 @@ p digest.byteslice(0, 32) == digest
 p (digest.byteslice(0, 16) + digest.byteslice(16, 16)) == digest
 p ("hdr" + digest) == ("hdr".b + digest)
 
-# An empty slice and a zero repeat answer the shared empty string; they must
-# not be tagged, because every other holder of it would be tagged too.
-p ["".empty?, bin.byteslice(0, 0).empty?, (bin * 0).empty?, "".encoding.to_s]
+# An empty result still has an encoding, and it is the source's. The shared
+# empty string cannot carry that -- marking it would tag it for every other
+# holder of the same pointer -- so a binary source gets a fresh one, and
+# nothing else pays for it.
+p [bin.byteslice(0, 0).encoding.to_s, bin[0, 0].encoding.to_s,
+   bin[3, 5].encoding.to_s, (bin * 0).encoding.to_s]
+p ["".encoding.to_s, "abc"[0, 0].encoding.to_s, ("ab" * 0).encoding.to_s]
+p ["".empty?, bin.byteslice(0, 0).empty?, (bin * 0).empty?]
