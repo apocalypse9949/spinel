@@ -2439,13 +2439,38 @@ static int emit_concurrency_call(Compiler *c, int id, Buf *b) {
 
   /* ConditionVariable instance methods */
   if (recv >= 0 && comp_ntype(c, recv) == TY_CONDVAR) {
-    if (sp_streq(name, "wait") && argc >= 1) {
-      /* wait(mutex): release the mutex, park, re-acquire. A timeout arg (argc==2)
-         is accepted but ignored at N=1 (no real clock blocking). */
+    if (sp_streq(name, "wait") && argc >= 1 && argc <= 2) {
+      /* wait(mutex): release the mutex, park, re-acquire. The 2-arg
+         `wait(mutex, timeout)` form is only supported when the timeout
+         is the literal integer 0; that path routes to the non-blocking
+         callee sp_CondVar_wait_nb (release, do not park, re-acquire).
+         A non-zero constant or a non-constant timeout expression is
+         rejected at compile time because the scheduler has no clock-
+         driven wakeup yet. The rejected cases still evaluate argv[0]
+         for side effects, matching CRuby's argument evaluation order. */
       int t = ++g_tmp;
       buf_printf(b, "({ sp_condvar *_t%d = ", t); emit_expr(c, recv, b);
-      buf_printf(b, "; sp_CondVar_wait(_t%d, ", t); emit_expr(c, argv[0], b);
-      buf_printf(b, "); _t%d; })", t);
+      if (argc == 1) {
+        buf_printf(b, "; sp_CondVar_wait(_t%d, ", t); emit_expr(c, argv[0], b);
+        buf_printf(b, "); _t%d; })", t);
+      }
+      else {
+        /* argv[0] is the mutex, argv[1] is the timeout */
+        int to_arg = argv[1];
+        const char *aty = nt_type(c->nt, to_arg);
+        if (aty && sp_streq(aty, "IntegerNode") &&
+            (int)nt_int(c->nt, to_arg, "value", 0) == 0) {
+          buf_printf(b, "; sp_CondVar_wait_nb(_t%d, ", t); emit_expr(c, argv[0], b);
+          buf_printf(b, "); _t%d; })", t);
+        }
+        else {
+          /* evaluate the timeout for side effects, then raise */
+          buf_printf(b, "; (void)("); emit_expr(c, to_arg, b);
+          buf_printf(b, "); sp_raise_cls(\"NotImplementedError\", "
+                       "\"ConditionVariable#wait with a non-zero or non-constant timeout is not supported in AOT\"); "
+                       "(sp_condvar *)_t%d; })", t);
+        }
+      }
       return 1;
     }
     if ((sp_streq(name, "signal") || sp_streq(name, "broadcast")) && argc == 0) {
