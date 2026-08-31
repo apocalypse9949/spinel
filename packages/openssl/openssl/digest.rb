@@ -25,6 +25,10 @@ module OpenSSL
     native_func :hmac_sha1_hex,   [:string, :string], :cstring, "sp_crypto_hmac_sha1_hex"
     native_func :hmac_sha256_bin, [:string, :string], :cbinstr, "sp_crypto_hmac_sha256_bin"
     native_func :hmac_sha1_bin,   [:string, :string], :cbinstr, "sp_crypto_hmac_sha1_bin"
+    # The CSPRNG the runtime already carries, for Cipher#random_key /
+    # #random_iv. Nothing here reaches libssl, so a key or an IV is drawn
+    # from the same source `securerandom` uses rather than a second one.
+    native_func :random_bin,      [:int],             :cbinstr, "sp_crypto_random_bin"
   end
 
   module Digest
