@@ -338,4 +338,7 @@ plain `gem install` work as for any hand-written extension.
 
 Layer underneath (any host, not just CRuby): `spinel kernel.rb -c
 --ext-init NAME --ext-entry Mod.m,...` emits a library with a host-callable
-init function and an `.h` contract -- see docs/internals/ext-design.md.
+init function and an `.h` contract that states each entry's C signature;
+`spinel --help` lists the flags. `spin ext build` drives exactly this, so
+the emitted `ext/<name>/<name>.h` of any scaffolded gem is a worked example
+of the contract.
