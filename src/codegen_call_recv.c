@@ -1167,31 +1167,24 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         buf_puts(b, "sp_re_split("); emit_expr(c, argv[0], b); buf_printf(b, ", _t%d.v.s)", tv);
       }
       else {
-        buf_printf(b, "sp_str_split_drop_trailing(_t%d.v.s, ", tv); emit_str_expr(c, argv[0], b); buf_puts(b, ")");
+        /* the split separator slot, shared with the String-receiver path:
+           handles the nil whitespace mode, statically and at run time, and
+           raises split's own TypeError wording for a wrong class (#4223) */
+        buf_printf(b, "sp_str_split_drop_trailing(_t%d.v.s, ", tv);
+        emit_str_pattern_expr(c, argv[0], b); buf_puts(b, ")");
       }
     }
     else {
       /* The separator of String#split can be nil ("split on whitespace" in
-         CRuby). sp_str_split_limit treats a NULL separator as the
-         whitespace mode; emit_str_expr's usual nil guard would raise
-         "no implicit conversion of nil into String" before the call,
-         preventing the documented idiom. Evaluate argv[0] for side
-         effects (a method call, an ivar read through a side-effecting
-         accessor) and discard the value, then pass NULL so the
-         runtime's branch is reached. A nil result is rare enough in
-         this slot that a single explicit type check is cheaper than
-         threading nil-tolerance through emit_str_expr. */
-      if (comp_ntype(c, argv[0]) == TY_NIL) {
-        int tsep = ++g_tmp;
-        buf_printf(b, "({ sp_RbVal _t%d = ", tsep); emit_boxed(c, argv[0], b);
-        buf_printf(b, "; (void)_t%d; sp_str_split_limit(_t%d.v.s, NULL, ",
-                   tsep, tv);
-        emit_int_expr(c, argv[1], b); buf_puts(b, "); })");
-      }
-      else {
-        buf_printf(b, "sp_str_split_limit(_t%d.v.s, ", tv); emit_str_expr(c, argv[0], b);
-        buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
-      }
+         CRuby); sp_str_split_limit treats a NULL separator as that mode.
+         emit_str_pattern_expr is the split-separator slot shared with the
+         String-receiver path: it evaluates a statically nil separator for
+         its side effects and passes NULL, keeps the same answer for a
+         separator that is nil only at run time, and raises split's own
+         TypeError wording for a wrong class (#4223). */
+      buf_printf(b, "sp_str_split_limit(_t%d.v.s, ", tv);
+      emit_str_pattern_expr(c, argv[0], b);
+      buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
     }
     buf_printf(b, " : (sp_StrArray *)(sp_raise_nomethod(sp_nomethod_msg(\"split\", _t%d)), (void *)0); })", tv);
     return 1;
@@ -6379,6 +6372,23 @@ void emit_str_pattern_expr(Compiler *c, int node, Buf *b) {
   if (cn && t != TY_STRING && t != TY_STRBUF) {
     buf_puts(b, "({ (void)("); emit_expr(c, node, b);
     buf_printf(b, "); sp_raise_cls(\"TypeError\", \"wrong argument type %s (expected Regexp)\"); (const char *)0; })", cn);
+    return;
+  }
+  /* nil is split's documented whitespace mode: evaluate for side effects and
+     pass NULL, which every sp_str_split_* entry answers as that mode (#4223).
+     A separator that is only nil AT RUN TIME (a poly slot) has to keep the
+     same answer, where the loose string conversion below renders nil as ""
+     and silently turns the call into a character split; a non-nil non-string
+     in that slot still raises through the strict conversion. */
+  if (t == TY_NIL) {
+    buf_puts(b, "({ (void)("); emit_expr(c, node, b);
+    buf_puts(b, "); (const char *)NULL; })");
+    return;
+  }
+  if (t == TY_POLY || t == TY_UNKNOWN) {
+    buf_puts(b, "sp_poly_arg_str_or_null(");
+    emit_boxed(c, node, b);
+    buf_puts(b, ")");
     return;
   }
   emit_str_expr_nilable(c, node, b);

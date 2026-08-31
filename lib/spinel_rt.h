@@ -2297,6 +2297,15 @@ static SP_INLINE const char *sp_poly_arg_str_chk(sp_RbVal v) {
   if (v.tag == SP_TAG_STR) return v.v.s;
   return sp_poly_arg_str_chk_slow(v);
 }
+/* String#split's separator slot: the one String slot CRuby documents nil in
+   (nil = whitespace mode). NULL preserves that answer, where the loose form
+   above stringifies nil to "" and turns the call into a character split; a
+   non-nil value takes the strict conversion, so an Integer separator still
+   raises CRuby's TypeError (#4223). */
+static SP_INLINE const char *sp_poly_arg_str_or_null(sp_RbVal v) {
+  if (v.tag == SP_TAG_NIL) return NULL;
+  return sp_poly_arg_str_chk(v);
+}
 /* A boxed value entering a PATH slot (File, Dir and IO's path arguments).
    CRuby's rb_get_path asks #to_path before #to_str, which is how a Pathname,
    or any user class that names a file, is accepted wherever a String path is.
