@@ -17432,6 +17432,13 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       else if (sp_streq(name, "readlines")) buf_printf(b, "sp_File_readlines(_t%d); })", tio2);
       else if (sp_streq(name, "rewind")) buf_printf(b, "sp_File_rewind(_t%d); })", tio2);
       else if (sp_streq(name, "sync")) buf_printf(b, "((void)_t%d, TRUE); })", tio2);
+      /* read(n) reads UP TO n bytes; dropping the count read to EOF, which on
+         a socket with a live peer never comes -- `r.read(5)` hung forever. */
+      else if (sp_streq(name, "read") && argc >= 1) {
+        buf_printf(b, "sp_File_read_n(_t%d, ", tio2);
+        emit_int_expr(c, argv[0], b);
+        buf_puts(b, "); })");
+      }
       else if (sp_streq(name, "read")) buf_printf(b, "sp_File_read(_t%d); })", tio2);
       else if (sp_streq(name, "gets")) buf_printf(b, "sp_File_gets(_t%d); })", tio2);
       else if (sp_streq(name, "readline")) buf_printf(b, "sp_File_readline_sep(_t%d, \"\\n\", 0, 0); })", tio2);
