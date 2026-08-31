@@ -5959,6 +5959,20 @@ else {
           buf_printf(b, " case SP_BUILTIN_INT_ARRAY: _t%d = sp_IntArray_get((sp_IntArray *)_t%d.v.p, %s); break;", tr, tv, idxref);
         }
       }
+      /* IO#write on a poly value when a user class owns the name: a Socket or
+         File from Socket.pair/File.open has no user-class arm in the switch,
+         but the dispatch was still opened (some other class does define
+         #write), so the builtin tag needs its own case. The runtime's
+         sp_File_write already routes to sp_sock_write when is_sock, so the
+         one entry covers both File and Socket receivers. */
+      if (sp_streq(name, "write") && argc == 1) {
+        Buf wa0; memset(&wa0, 0, sizeof wa0);
+        if (atmp_ty[0] == TY_STRING) emit_str_expr(c, argv[0], &wa0);
+        else { buf_puts(&wa0, "sp_poly_to_s("); emit_boxed(c, argv[0], &wa0); buf_puts(&wa0, ")"); }
+        buf_printf(b, " case SP_BUILTIN_IO: _t%d = sp_File_write((sp_File *)_t%d.v.p, %s); break;",
+                   tr, tv, wa0.p ? wa0.p : "NULL");
+        free(wa0.p);
+      }
       if (is_push) {
         /* The value is a builtin array: append each (boxed) arg via sp_poly_shl,
            which dispatches on the array kind. `push`/`<<`/`append` return the
