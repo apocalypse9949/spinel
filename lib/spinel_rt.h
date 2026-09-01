@@ -8164,8 +8164,20 @@ static void sp_raise_exc(volatile sp_Exception *ve) {
    anything else is CRuby's TypeError. */
 SP_NORETURN SP_COLD static void sp_raise_poly(sp_RbVal v) {
   if (v.tag == SP_TAG_STR && v.v.s) sp_raise(v.v.s);
-  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_EXCEPTION && v.v.p)
-    sp_raise_exc((volatile sp_Exception *)v.v.p);
+  if (v.tag == SP_TAG_OBJ && v.v.p) {
+    /* A carried exception object re-raises as itself. The base sp_Exception
+     * uses cls_id SP_BUILTIN_EXCEPTION; a user subclass (e.g. HttpClient::
+     * RequestTransportError) has a positive cls_id but its struct still
+     * starts with the sp_Exception prefix, so its `parent_cls_name` says
+     * whether it inherits from Exception. Both shapes are re-raised here. */
+    if (v.cls_id == SP_BUILTIN_EXCEPTION)
+      sp_raise_exc((volatile sp_Exception *)v.v.p);
+    else {
+      sp_Exception *_e = (sp_Exception *)v.v.p;
+      if (_e->parent_cls_name != NULL)
+        sp_raise_exc(_e);
+    }
+  }
   /* A Class VALUE naming an exception class raises that class, exactly as the
      constant does: `k = App::Failed; raise k` and `[A, B].each { |k| raise k }`
      are the same raise as `raise App::Failed`. Only the literal-constant form

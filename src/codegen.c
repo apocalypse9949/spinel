@@ -982,8 +982,14 @@ void emit_boxed(Compiler *c, int node, Buf *b) {
     int ocid = ty_object_class(t);
     /* A class with subclasses is only the STATIC type here: an inherited
        method boxing `self` would stamp the defining class, and the boxed value
-       then dispatched as the parent (#3773). Read the id the object carries. */
-    int subclassed = !is_val && class_has_subclass(c, ocid);
+       then dispatched as the parent (#3773). Read the id the object carries.
+       Exception subclasses are a special case: the runtime layout (sp_Exception
+       + ivars) starts with `cls_name` (a pointer), NOT a cls_id header, so
+       sp_box_nullable_obj_dyn's read of the first sizeof(sp_int) bytes reads
+       the low bits of a heap pointer. Use the static cls_id for them -- the
+       static type always matches the runtime type because `Class.new` is the
+       only path and it stamps the requested class. */
+    int subclassed = !is_val && class_has_subclass(c, ocid) && !class_is_exc_subclass(c, ocid);
     if (is_val) buf_printf(b, "sp_box_vobj_%s(", c->classes[ocid].c_name);
     else if (subclassed) buf_puts(b, "sp_box_nullable_obj_dyn((void *)(");
     else buf_puts(b, "sp_box_nullable_obj((void *)(");

@@ -149,7 +149,21 @@ void sp_exc_gc_scan(void *p) {
   sp_mark_rbval(e->xname);
   sp_mark_rbval(e->xkey);
   sp_mark_rbval(e->xrecv);
+  if (e->backtrace) sp_gc_mark(e->backtrace);
   /* cls_name/parent_cls_name point into rodata -- not GC-managed strings */
+}
+
+/* Exception#set_backtrace: replace the stored backtrace with `bt`. The
+ * StrArray (or NULL) is GC-marked by sp_exc_gc_scan via the backtrace
+ * field; the previous array, if any, is left to the sweep. CRuby returns
+ * the array; the AOT codegen reads the receiver from this return value
+ * (the sp_RbVal of the stored array) to satisfy `e.set_backtrace(bt)`
+ * in a chain. */
+sp_RbVal sp_Exception_set_backtrace(sp_Exception *e, sp_StrArray *bt) {
+  SP_GC_ROOT(e);
+  SP_GC_ROOT(bt);  /* SP_GC_ROOT tolerates NULL; the root array is just left with a NULL slot, harmless */
+  e->backtrace = bt;
+  return bt ? sp_box_obj(bt, SP_BUILTIN_STR_ARRAY) : sp_box_nil();
 }
 /* cls_name is rodata -- every caller passes a bare literal, and the scan below
    says so and never marks it. Rooting it as a STRING had the collector read
