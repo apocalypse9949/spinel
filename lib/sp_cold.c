@@ -34,6 +34,7 @@
 #include "sp_system.h" /* sp_last_status for backtick */
 #include "sp_format.h" /* sp_float_to_rational for sp_float_denominator/numerator */
 #include <sys/select.h>  /* IO.select and the IO#wait_* readiness family */
+#include <poll.h>        /* POLLIN/POLLOUT for the scheduler park behind them */
 #include <sys/socket.h> /* SOCK_STREAM / SOCK_DGRAM for Addrinfo */
 
 /* lib/sp_gc.c. Declared here rather than in sp_gc.h: that header is included
@@ -3171,10 +3172,27 @@ static void sp_io_sel_timeout(double timeout, struct timeval *tv, struct timeval
   tv->tv_usec = (suseconds_t)((timeout - (double)tv->tv_sec) * 1000000.0);
   *tvp = tv;
 }
+#ifdef SP_THREADS
+/* Under the threaded runtime a timed single-fd wait parks the green thread
+   (sp_sched_wait_io_timeout) instead of sitting in select(2): select blocks
+   the OS worker for the whole timeout, and once every worker is pinned by a
+   waiter the thread that would make the fd ready cannot run, so every waiter
+   times out. Priority (exceptfds) stays on select -- poll's POLLPRI is not the
+   same thing (see below) -- and so does a zero timeout, which is a peek. */
+static short sp_io_park_events(sp_int kind) {
+  return kind == 0 ? POLLIN : kind == 1 ? POLLOUT : kind == 3 ? (POLLIN | POLLOUT) : 0;
+}
+#endif
 sp_File *sp_io_wait_events(sp_File *f, double timeout, sp_int kind) {SP_GC_ROOT(f);
   if (!f || !f->fp) sp_raise_cls("IOError", "closed stream");
   int fd = fileno(f->fp);
   if (fd < 0 || fd >= FD_SETSIZE) sp_raise_cls("IOError", "file descriptor out of range");
+#ifdef SP_THREADS
+  if (sp_io_park_events(kind) && timeout != 0.0) {
+    extern int sp_sched_wait_io_timeout(int fd, short events, double timeout_s);
+    return sp_sched_wait_io_timeout(fd, sp_io_park_events(kind), timeout) ? f : NULL;
+  }
+#endif
   fd_set rs, ws, es;
   FD_ZERO(&rs); FD_ZERO(&ws); FD_ZERO(&es);
   if (kind == 0 || kind == 3) FD_SET(fd, &rs);
@@ -3221,6 +3239,26 @@ sp_RbVal sp_io_select(sp_PolyArray *rd, sp_PolyArray *wr, sp_PolyArray *er, doub
       if (fd > maxfd) maxfd = fd;
     }
   }
+#ifdef SP_THREADS
+  {
+    sp_int nrd = rd ? rd->len : 0, nwr = wr ? wr->len : 0, ner = er ? er->len : 0;
+    if (nrd + nwr == 1 && ner == 0 && timeout != 0.0) {
+      extern int sp_sched_wait_io_timeout(int fd, short events, double timeout_s);
+      int g = nrd ? 0 : 1;
+      sp_RbVal io = src[g]->data[0];
+      sp_File *f = sp_select_io_of(io);
+      if (!sp_sched_wait_io_timeout(fileno(f->fp), g == 0 ? POLLIN : POLLOUT, timeout)) return sp_box_nil();
+      sp_PolyArray *one = sp_PolyArray_new();
+      SP_GC_ROOT(one);
+      for (int k = 0; k < 3; k++) {
+        sp_PolyArray *part = sp_PolyArray_new();
+        if (k == g) sp_PolyArray_push(part, io);
+        sp_PolyArray_push(one, sp_box_poly_array(part));
+      }
+      return sp_box_poly_array(one);
+    }
+  }
+#endif
   struct timeval tv, *tvp;
   sp_io_sel_timeout(timeout, &tv, &tvp);
   int n;

@@ -58,7 +58,11 @@ is a user guarantee.
 `Kernel#sleep` and blocking I/O are **scheduler-aware**: a sleeping or
 I/O-blocked thread frees its OS worker for other green threads instead of
 holding it idle, and the monitor wakes it when the deadline passes or the fd
-becomes ready.
+becomes ready. A *timed* readiness wait on one IO -- `IO#wait_readable(t)`,
+`IO#wait_writable(t)`, `IO.select([io], nil, nil, t)` -- parks the same way,
+and wakes on whichever of the fd or the deadline comes first. `IO.select`
+over several IOs still runs on `select(2)` and holds its worker for the
+duration.
 
 ### Synchronization primitives
 
