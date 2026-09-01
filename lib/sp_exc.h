@@ -42,6 +42,10 @@ typedef struct sp_Exception_s {
                                   receiver (nil.foo), so the box cannot say (#3036) */
   sp_bool has_key;            /* likewise for KeyError#key (#3030) */
   sp_bool priv_call;          /* NoMethodError#private_call? (#3042) */
+  sp_StrArray *backtrace;     /* an attached backtrace set by #set_backtrace; nil
+                                 means "no caller ever set one" (CRuby answers
+                                 nil for the unset case). The GC mark visits it
+                                 alongside the boxed fields. */
 } sp_Exception;
 
 extern const char *(*sp_user_exc_parent_fn)(const char *);   /* set by the generated main() */
@@ -75,6 +79,11 @@ void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg);
 void sp_exc_gc_scan(void *p);
 sp_Exception *sp_exc_new(const char *cls_name, const char *msg);
 sp_bool sp_exc_eq(sp_Exception *a, sp_Exception *b);
+/* Exception#set_backtrace: attach (or replace) the backtrace array. The
+ * StrArray is GC-managed; the sp_Exception holds a single owner reference
+ * and is updated in place. Returns the boxed value so chained assignments
+ * (`e = e.set_backtrace(bt)`) work. */
+sp_RbVal sp_Exception_set_backtrace(sp_Exception *e, sp_StrArray *bt);
 sp_Exception *sp_exc_new_sub(const char *cls_name, const char *parent_cls, const char *msg);
 sp_Exception *sp_exc_dup(sp_Exception *e);
 void *sp_exc_apply_staged(const char *cls, const char *msg, void *obj);

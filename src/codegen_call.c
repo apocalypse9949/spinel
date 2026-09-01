@@ -19550,7 +19550,11 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       else if (at == TY_POLY || at == TY_CLASS) {
         /* the runtime value may be a string, an exception object, an exception
            CLASS reached through a variable, or a non-exception (TypeError) --
-           dispatch on the tag */
+           dispatch on the tag. Only the base Exception (SP_BUILTIN_EXCEPTION)
+           is handled by the runtime; user exception subclasses are re-raised
+           by the codegen when their static type is known (see the
+           ty_is_object branch above). Reading parent_cls_name on an
+           arbitrary poly-tagged object is a wrong-offset read (segfault). */
         buf_puts(b, "sp_raise_poly("); emit_boxed(c, av[0], b); buf_puts(b, ")");
       }
       else {
@@ -19636,7 +19640,17 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         return;
       }
       if (sp_streq(name, "backtrace")) {
-        buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_puts(b, "), (sp_StrArray *)0)");
+        int tbt = ++g_tmp;
+        buf_printf(b, "({ sp_Exception *_t%d = (sp_Exception *)(", tbt);
+        emit_expr(c, recv, b);
+        /* The base sp_Exception's `backtrace` field is mirrored by
+         * every user exception subclass struct (codegen emits it in
+         * the struct definition for ivar-bearing classes; nivars==0
+         * subclasses are typedef'd to sp_Exception). So `_t->backtrace`
+         * is valid for both shapes. CRuby returns nil for a fresh
+         * exception that never had set_backtrace called; we do the
+         * same. sp_StrArray_inspect handles NULL and prints "nil". */
+        buf_printf(b, "); _t%d->backtrace; })", tbt);
         return;
       }
       { int tfm = ++g_tmp;
@@ -19684,6 +19698,69 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
   }
 
   /* exception object methods */
+  /* Exception#backtrace: return the stored backtrace (attached by
+   * #set_backtrace), or fall back to the stack captured at the most recent
+   * raise. The receiver is `sp_Exception *` for the rescued variable; the
+   * stored `backtrace` field is on the base sp_Exception struct, not on a
+   * user subclass (whose fields are at different offsets), so read it only
+   * when this is a base exception instance -- a user subclass's #backtrace
+   * method dispatches before this rule can fire (the chain check at the
+   * gate would have returned >= 0 for a user-defined #backtrace). For a
+   * rescued user subclass, fall through to the empty sp_StrArray return
+   * the legacy path already provided. */
+  if (sp_streq(name, "backtrace") && argc == 0 && recv >= 0) {
+    TyKind rrt = comp_ntype(c, recv);
+    int exc_ok = (rrt == TY_EXCEPTION) ||
+                 (ty_is_object(rrt) && class_is_exc_subclass(c, ty_object_class(rrt)));
+    if (exc_ok && comp_method_in_chain(c, ty_object_class(rrt), name, NULL) < 0) {
+      /* The base sp_Exception struct's backtrace field is the storage for
+       * a builtin exception. A user exception subclass has a different
+       * layout (the first 8 base fields, then its own ivars -- the base
+       * struct's `backtrace` field is NOT in the user struct, so reading
+       * it via a base cast is undefined). The user class's #backtrace
+       * method (which dispatches before this rule) reads its own ivar.
+       * The remaining case is a rescue variable whose concrete class the
+       * analyze pass lost: read the user struct's first ivar, which is
+       * at a known offset (after the 8 base fields shared by every user
+       * exception subclass). The user class's #set_backtrace stored there. */
+      int t = ++g_tmp;
+      buf_printf(b, "({ sp_Exception *_t%d = (sp_Exception *)(", t);
+      emit_expr(c, recv, b);
+      /* The base sp_Exception's `backtrace` field is mirrored by
+       * every user exception subclass struct (codegen emits it in
+       * the struct definition for ivar-bearing classes; nivars==0
+       * subclasses are typedef'd to sp_Exception). So `_t->backtrace`
+       * is valid for both shapes; no offset arithmetic, no risk
+       * of reading an unrelated ivar as a backtrace. The chain
+       * check above already stood down for any class that defines
+       * its own #backtrace. */
+      buf_printf(b, "); _t%d->backtrace; })", t);
+      return;
+    }
+  }
+  /* Exception#set_backtrace(bt): store the array on the exception so a
+   * later #backtrace returns it. The gate fires for both a bare exception
+   * receiver (TY_EXCEPTION) and a user exception subclass instance
+   * (TY_OBJECT of a class that inherits Exception), and stands down for
+   * a user class that defines its own set_backtrace. The arg arrives as
+   * a sp_RbVal (the call site boxes); the runtime takes sp_StrArray * out
+   * of the box and stores it on the sp_Exception. The return is
+   * sp_box_obj(bt) so a chain like `e = e.set_backtrace(bt)` keeps the
+   * array. */
+  if (argc == 1 && sp_streq(name, "set_backtrace") && recv >= 0) {
+    TyKind rrt = comp_ntype(c, recv);
+    int exc_ok = (rrt == TY_EXCEPTION) ||
+                 (ty_is_object(rrt) && class_is_exc_subclass(c, ty_object_class(rrt)));
+    if (exc_ok && comp_method_in_chain(c, ty_object_class(rrt), name, NULL) < 0) {
+      int t = ++g_tmp;
+      buf_printf(b, "({ sp_Exception *_t%d = (sp_Exception *)((void*)(", t);
+      emit_expr(c, recv, b);
+      buf_printf(b, ")); sp_Exception_set_backtrace(_t%d, ", t);
+      emit_expr(c, argv[0], b);
+      buf_puts(b, "); })");
+      return;
+    }
+  }
   /* exception accessors on a POLY receiver (an exception rescued into a
      union-typed local): runtime unbox-and-delegate, but only when no user
      class defines the name (which would need the poly method dispatch)

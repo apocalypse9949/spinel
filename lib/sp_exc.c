@@ -149,7 +149,35 @@ void sp_exc_gc_scan(void *p) {
   sp_mark_rbval(e->xname);
   sp_mark_rbval(e->xkey);
   sp_mark_rbval(e->xrecv);
+  /* backtrace storage: the base sp_Exception's `backtrace` field is
+   * mirrored by every user exception subclass struct (codegen emits
+   * it in the struct definition for ivar-bearing classes; nivars==0
+   * subclasses are typedef'd to sp_Exception). So `e->backtrace` is
+   * valid for both shapes and the GC can mark it directly. */
+  if (e->backtrace) sp_gc_mark(e->backtrace);
   /* cls_name/parent_cls_name point into rodata -- not GC-managed strings */
+}
+
+/* Exception#set_backtrace: replace the stored backtrace with `bt`.
+ * The base sp_Exception's `backtrace` field is mirrored by every
+ * user exception subclass struct (codegen emits it in the struct
+ * definition for ivar-bearing classes; nivars==0 subclasses are
+ * typedef'd to sp_Exception). So `e->backtrace` is valid for both
+ * shapes, no offset arithmetic needed.
+ *
+ * The codegen gate at src/codegen_call.c stands down for any user
+ * class that defines its own #set_backtrace, so this builtin only
+ * runs for the base sp_Exception and for user subclasses that did
+ * NOT define their own.
+ *
+ * CRuby returns the array; the AOT codegen reads the receiver from
+ * this return value (the sp_RbVal of the stored array) to satisfy
+ * `e.set_backtrace(bt)` in a chain. */
+sp_RbVal sp_Exception_set_backtrace(sp_Exception *e, sp_StrArray *bt) {
+  SP_GC_ROOT(e);
+  SP_GC_ROOT(bt);
+  e->backtrace = bt;
+  return bt ? sp_box_obj(bt, SP_BUILTIN_STR_ARRAY) : sp_box_nil();
 }
 /* cls_name is rodata -- every caller passes a bare literal, and the scan below
    says so and never marks it. Rooting it as a STRING had the collector read

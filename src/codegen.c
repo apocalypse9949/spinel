@@ -982,8 +982,14 @@ void emit_boxed(Compiler *c, int node, Buf *b) {
     int ocid = ty_object_class(t);
     /* A class with subclasses is only the STATIC type here: an inherited
        method boxing `self` would stamp the defining class, and the boxed value
-       then dispatched as the parent (#3773). Read the id the object carries. */
-    int subclassed = !is_val && class_has_subclass(c, ocid);
+       then dispatched as the parent (#3773). Read the id the object carries.
+       Exception subclasses are a special case: the runtime layout (sp_Exception
+       + ivars) starts with `cls_name` (a pointer), NOT a cls_id header, so
+       sp_box_nullable_obj_dyn's read of the first sizeof(sp_int) bytes reads
+       the low bits of a heap pointer. Use the static cls_id for them -- the
+       static type always matches the runtime type because `Class.new` is the
+       only path and it stamps the requested class. */
+    int subclassed = !is_val && class_has_subclass(c, ocid) && !class_is_exc_subclass(c, ocid);
     if (is_val) buf_printf(b, "sp_box_vobj_%s(", c->classes[ocid].c_name);
     else if (subclassed) buf_puts(b, "sp_box_nullable_obj_dyn((void *)(");
     else buf_puts(b, "sp_box_nullable_obj((void *)(");
@@ -5421,9 +5427,10 @@ void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
        sp_Exception (cls_name/parent_cls_name/msg/cause/result/xname/xkey/
        xrecv) -- a common initial sequence -- so every `(sp_Exception *)` cast
        in the raise/rescue and message machinery stays valid, with the ivar
-       fields after (#1415). Every base member must be mirrored: the rescue
-       machinery and the GC scan / constructor write them through the base
-       cast, so omitting one would alias (and overrun into) the first ivar. */
+       fields after (#1415). Every base member up through `backtrace` must
+       be mirrored: the rescue machinery, the GC scan, and #set_backtrace
+       write/read through the base cast, so omitting one would alias
+       (and overrun into) the first ivar. */
     if (ci->nivars == 0) return;
     buf_printf(b, "struct sp_%s_s {\n", ci->c_name);
     buf_puts(b, "  const char *cls_name;\n");
@@ -5434,6 +5441,14 @@ void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
     buf_puts(b, "  sp_RbVal xname;\n");
     buf_puts(b, "  sp_RbVal xkey;\n");
     buf_puts(b, "  sp_RbVal xrecv;\n");
+    /* Trailing base fields: the GC scan reads has_recv/has_key/priv_call
+       through the base cast, and #set_backtrace writes `backtrace` through
+       the same cast. Mirror them so the offsets match sp_Exception exactly
+       and the cast stays valid for ivar-bearing subclasses too. */
+    buf_puts(b, "  sp_bool has_recv;\n");
+    buf_puts(b, "  sp_bool has_key;\n");
+    buf_puts(b, "  sp_bool priv_call;\n");
+    buf_puts(b, "  sp_StrArray *backtrace;\n");
     for (int i = 0; i < ci->nivars; i++) {
       TyKind t = ci->ivar_types[i];
       /* belt and suspenders: analyze widens void/nil ivar slots to poly
@@ -5494,6 +5509,7 @@ void emit_class_scan(Compiler *c, ClassInfo *ci, Buf *b) {
     buf_puts(b, "  sp_mark_rbval(o->xname);\n");
     buf_puts(b, "  sp_mark_rbval(o->xkey);\n");
     buf_puts(b, "  sp_mark_rbval(o->xrecv);\n");
+    buf_puts(b, "  if (o->backtrace) sp_gc_mark(o->backtrace);\n");
   }
   for (int i = 0; i < ci->nivars; i++) {
     TyKind t = ci->ivar_types[i];
@@ -9824,6 +9840,28 @@ char *codegen_program(const NodeTable *nt) {
     if (lv->init_guarded) buf_printf(&b, "static int sp_init_in_progress_%s;\n", lv->name);
   }
   if (c->ngvars || c->nconsts) buf_puts(&b, "\n");
+
+  /* Runtime class table: cls_ids of every user exception subclass.
+   * sp_raise_poly checks this before re-raising a boxed object,
+   * because reading the sp_Exception prefix on a non-exception user
+   * object is a wrong-offset read (segfault under clang). The
+   * `sp_exc_subclass_count == 0` case still emits the symbols so
+   * the runtime links without a separate stub. */
+  {
+    int n = 0;
+    for (int i = 0; i < c->nclasses; i++)
+      if (class_is_exc_subclass(c, i)) n++;
+    buf_printf(&b, "const sp_int sp_exc_subclass_count = %d;\n", n);
+    if (n > 0) {
+      buf_puts(&b, "const sp_int sp_exc_subclass_ids[] = {");
+      for (int i = 0; i < c->nclasses; i++)
+        if (class_is_exc_subclass(c, i))
+          buf_printf(&b, " %d,", i);
+      buf_puts(&b, " };\n");
+    } else {
+      buf_puts(&b, "const sp_int sp_exc_subclass_ids[] = { 0 };\n");
+    }
+  }
 
   /* GC marking for the file-scope statics above: heap objects reachable
      only through a global/constant/class-ivar slot would otherwise be
