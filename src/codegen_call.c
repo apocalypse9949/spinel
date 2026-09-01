@@ -19660,11 +19660,14 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       buf_printf(b, "({ sp_Exception *_t%d = (sp_Exception *)(", t);
       emit_expr(c, recv, b);
       /* For a user subclass, `_t->backtrace` reads past the end of the
-       * struct (undefined). Read the first user ivar at offset 96 (4
-       * pointers + 4 sp_RbVal = 32 + 64 -- the shared 8-field base
-       * prefix every user exception subclass carries). The user class's
-       * #set_backtrace stored there. */
-      buf_printf(b, "); sp_StrArray *_t%d_bt = _t%d->parent_cls_name ? *(sp_StrArray **)((char *)_t%d + 96) : _t%d->backtrace; _t%d_bt ? _t%d_bt : sp_backtrace_captured(); })", t, t, t, t, t, t);
+       * struct (undefined). Read the first user ivar at
+       * offsetof(sp_Exception, has_recv) -- the slot right after the
+       * 8-field shared base prefix (cls_name through xrecv) every user
+       * exception subclass carries. Named via offsetof so struct
+       * reordering is safe; the same offset is used by the setter
+       * (sp_Exception_set_backtrace in lib/sp_exc.c) and the GC scan
+       * (sp_exc_gc_scan in lib/sp_exc.c). */
+      buf_printf(b, "); sp_StrArray *_t%d_bt = _t%d->parent_cls_name ? *(sp_StrArray **)((char *)_t%d + offsetof(sp_Exception, has_recv)) : _t%d->backtrace; _t%d_bt ? _t%d_bt : sp_backtrace_captured(); })", t, t, t, t, t, t);
       return;
     }
   }

@@ -150,13 +150,15 @@ void sp_exc_gc_scan(void *p) {
   sp_mark_rbval(e->xkey);
   sp_mark_rbval(e->xrecv);
   /* backtrace storage: base sp_Exception uses the `backtrace` field;
-   * user subclasses store it in their first user ivar at offset 96.
-   * The user struct is smaller than the base, so reading `e->backtrace`
-   * on a user subclass is past the end of the struct (UB). */
+   * user subclasses store it in their first user ivar at
+   * offsetof(sp_Exception, has_recv) -- the slot right after the
+   * 8-field shared base prefix. The user struct is smaller than the
+   * base, so reading `e->backtrace` on a user subclass is past the
+   * end of the struct (UB). */
   if (e->parent_cls_name == NULL) {
     if (e->backtrace) sp_gc_mark(e->backtrace);
   } else {
-    sp_StrArray *bt = *(sp_StrArray **)((char *)e + 96);
+    sp_StrArray *bt = *(sp_StrArray **)((char *)e + offsetof(sp_Exception, has_recv));
     if (bt) sp_gc_mark(bt);
   }
   /* cls_name/parent_cls_name point into rodata -- not GC-managed strings */
@@ -167,16 +169,15 @@ void sp_exc_gc_scan(void *p) {
  * class that defines its own #set_backtrace, so this builtin only
  * runs for the base sp_Exception and for user subclasses that did
  * NOT define their own. For the user-subclass case the storage
- * location is the first user ivar at offset 96 (same offset the
- * getter reads, per the shared-accessor contract below). The user
- * struct does NOT carry the base struct's `backtrace` field, so
- * writing `e->backtrace` on a user subclass would write past the
- * end of the struct.
+ * location is the first user ivar, which sits right after the 8
+ * shared base-prefix fields (cls_name through xrecv). Using
+ * offsetof(sp_Exception, has_recv) names that location without
+ * hardcoding a byte count, so struct reordering is safe.
  *
  * Shared-accessor contract: this runtime and the codegen getter
  * (src/codegen_call.c, around the backtrace arm) must use the
- * same storage location for each shape. The getter already reads
- * offset 96 for user subclasses; this setter writes there too. If
+ * same storage location for each shape. The getter reads the
+ * same offsetof-based slot; this setter writes there too. If
  * either side changes, update both.
  *
  * GC marking: sp_exc_gc_scan visits the right slot for each shape.
@@ -192,9 +193,11 @@ sp_RbVal sp_Exception_set_backtrace(sp_Exception *e, sp_StrArray *bt) {
   } else {
     /* User exception subclass that did NOT define its own
      * #set_backtrace (the chain check in the codegen arm stands
-     * down for any class that does). Storage: first user ivar at
-     * offset 96. See comment above. */
-    *(sp_StrArray **)((char *)e + 96) = bt;
+     * down for any class that does). Storage: first user ivar,
+     * at offsetof(sp_Exception, has_recv) -- the slot right after
+     * the 8-field shared base prefix every user exception subclass
+     * carries. */
+    *(sp_StrArray **)((char *)e + offsetof(sp_Exception, has_recv)) = bt;
   }
   return bt ? sp_box_obj(bt, SP_BUILTIN_STR_ARRAY) : sp_box_nil();
 }
