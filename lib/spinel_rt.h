@@ -8159,24 +8159,38 @@ static void sp_raise_exc(volatile sp_Exception *ve) {
   sp_pending_exc_obj = (void *)e;
   sp_raise_cls(e->cls_name, e->msg);
 }
+/* Runtime class table: set of cls_ids that are user exception subclasses.
+   Populated by the codegen (src/codegen.c) for every class that
+   `class_is_exc_subclass` returns true. Used by sp_raise_poly to
+   verify a boxed object is an exception subclass before re-raising
+   it -- reading the sp_Exception prefix on a non-exception user
+   object is a wrong-offset read (segfault). */
+extern const sp_int sp_exc_subclass_ids[];
+extern const sp_int sp_exc_subclass_count;
+
+static inline int sp_is_exc_subclass_cls(sp_int cls_id) {
+  for (sp_int i = 0; i < sp_exc_subclass_count; i++)
+    if (sp_exc_subclass_ids[i] == cls_id) return 1;
+  return 0;
+}
+
 /* Kernel#raise with a runtime-typed (poly) operand: a String raises
    RuntimeError with it, a carried exception object re-raises as itself,
    anything else is CRuby's TypeError. */
 SP_NORETURN SP_COLD static void sp_raise_poly(sp_RbVal v) {
   if (v.tag == SP_TAG_STR && v.v.s) sp_raise(v.v.s);
   if (v.tag == SP_TAG_OBJ && v.v.p) {
-    /* A carried exception object re-raises as itself. The base sp_Exception
-     * uses cls_id SP_BUILTIN_EXCEPTION; a user subclass (e.g. HttpClient::
-     * RequestTransportError) has a positive cls_id but its struct still
-     * starts with the sp_Exception prefix, so its `parent_cls_name` says
-     * whether it inherits from Exception. Both shapes are re-raised here. */
+    /* A carried exception object re-raises as itself. The base
+     * sp_Exception uses cls_id SP_BUILTIN_EXCEPTION; a user subclass
+     * has a positive cls_id registered in sp_exc_subclass_ids. Both
+     * shapes are re-raised here. Any other boxed object (a non-exception
+     * user class) would have a different struct layout -- reading
+     * the sp_Exception prefix at this offset is undefined and segfaults
+     * under clang's aggressive stack hoisting (#XXXX). */
     if (v.cls_id == SP_BUILTIN_EXCEPTION)
       sp_raise_exc((volatile sp_Exception *)v.v.p);
-    else {
-      sp_Exception *_e = (sp_Exception *)v.v.p;
-      if (_e->parent_cls_name != NULL)
-        sp_raise_exc(_e);
-    }
+    else if (sp_is_exc_subclass_cls(v.cls_id))
+      sp_raise_exc((volatile sp_Exception *)v.v.p);
   }
   /* A Class VALUE naming an exception class raises that class, exactly as the
      constant does: `k = App::Failed; raise k` and `[A, B].each { |k| raise k }`

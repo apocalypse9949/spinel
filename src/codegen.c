@@ -9812,6 +9812,28 @@ char *codegen_program(const NodeTable *nt) {
   }
   if (c->ngvars || c->nconsts) buf_puts(&b, "\n");
 
+  /* Runtime class table: cls_ids of every user exception subclass.
+   * sp_raise_poly checks this before re-raising a boxed object,
+   * because reading the sp_Exception prefix on a non-exception user
+   * object is a wrong-offset read (segfault under clang). The
+   * `sp_exc_subclass_count == 0` case still emits the symbols so
+   * the runtime links without a separate stub. */
+  {
+    int n = 0;
+    for (int i = 0; i < c->nclasses; i++)
+      if (class_is_exc_subclass(c, i)) n++;
+    buf_printf(&b, "const sp_int sp_exc_subclass_count = %d;\n", n);
+    if (n > 0) {
+      buf_puts(&b, "const sp_int sp_exc_subclass_ids[] = {");
+      for (int i = 0; i < c->nclasses; i++)
+        if (class_is_exc_subclass(c, i))
+          buf_printf(&b, " %d,", i);
+      buf_puts(&b, " };\n");
+    } else {
+      buf_puts(&b, "const sp_int sp_exc_subclass_ids[] = { 0 };\n");
+    }
+  }
+
   /* GC marking for the file-scope statics above: heap objects reachable
      only through a global/constant/class-ivar slot would otherwise be
      swept (RAND = Rand.new lost its PRNG mid-render). Chained ahead of

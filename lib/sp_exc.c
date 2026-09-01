@@ -149,20 +149,53 @@ void sp_exc_gc_scan(void *p) {
   sp_mark_rbval(e->xname);
   sp_mark_rbval(e->xkey);
   sp_mark_rbval(e->xrecv);
-  if (e->backtrace) sp_gc_mark(e->backtrace);
+  /* backtrace storage: base sp_Exception uses the `backtrace` field;
+   * user subclasses store it in their first user ivar at offset 96.
+   * The user struct is smaller than the base, so reading `e->backtrace`
+   * on a user subclass is past the end of the struct (UB). */
+  if (e->parent_cls_name == NULL) {
+    if (e->backtrace) sp_gc_mark(e->backtrace);
+  } else {
+    sp_StrArray *bt = *(sp_StrArray **)((char *)e + 96);
+    if (bt) sp_gc_mark(bt);
+  }
   /* cls_name/parent_cls_name point into rodata -- not GC-managed strings */
 }
 
-/* Exception#set_backtrace: replace the stored backtrace with `bt`. The
- * StrArray (or NULL) is GC-marked by sp_exc_gc_scan via the backtrace
- * field; the previous array, if any, is left to the sweep. CRuby returns
- * the array; the AOT codegen reads the receiver from this return value
- * (the sp_RbVal of the stored array) to satisfy `e.set_backtrace(bt)`
- * in a chain. */
+/* Exception#set_backtrace: replace the stored backtrace with `bt`.
+ * The codegen gate at src/codegen_call.c stands down for any user
+ * class that defines its own #set_backtrace, so this builtin only
+ * runs for the base sp_Exception and for user subclasses that did
+ * NOT define their own. For the user-subclass case the storage
+ * location is the first user ivar at offset 96 (same offset the
+ * getter reads, per the shared-accessor contract below). The user
+ * struct does NOT carry the base struct's `backtrace` field, so
+ * writing `e->backtrace` on a user subclass would write past the
+ * end of the struct.
+ *
+ * Shared-accessor contract: this runtime and the codegen getter
+ * (src/codegen_call.c, around the backtrace arm) must use the
+ * same storage location for each shape. The getter already reads
+ * offset 96 for user subclasses; this setter writes there too. If
+ * either side changes, update both.
+ *
+ * GC marking: sp_exc_gc_scan visits the right slot for each shape.
+ *
+ * CRuby returns the array; the AOT codegen reads the receiver from
+ * this return value (the sp_RbVal of the stored array) to satisfy
+ * `e.set_backtrace(bt)` in a chain. */
 sp_RbVal sp_Exception_set_backtrace(sp_Exception *e, sp_StrArray *bt) {
   SP_GC_ROOT(e);
-  SP_GC_ROOT(bt);  /* SP_GC_ROOT tolerates NULL; the root array is just left with a NULL slot, harmless */
-  e->backtrace = bt;
+  SP_GC_ROOT(bt);
+  if (e->parent_cls_name == NULL) {
+    e->backtrace = bt;
+  } else {
+    /* User exception subclass that did NOT define its own
+     * #set_backtrace (the chain check in the codegen arm stands
+     * down for any class that does). Storage: first user ivar at
+     * offset 96. See comment above. */
+    *(sp_StrArray **)((char *)e + 96) = bt;
+  }
   return bt ? sp_box_obj(bt, SP_BUILTIN_STR_ARRAY) : sp_box_nil();
 }
 /* cls_name is rodata -- every caller passes a bare literal, and the scan below

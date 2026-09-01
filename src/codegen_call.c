@@ -19493,7 +19493,11 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       else if (at == TY_POLY || at == TY_CLASS) {
         /* the runtime value may be a string, an exception object, an exception
            CLASS reached through a variable, or a non-exception (TypeError) --
-           dispatch on the tag */
+           dispatch on the tag. Only the base Exception (SP_BUILTIN_EXCEPTION)
+           is handled by the runtime; user exception subclasses are re-raised
+           by the codegen when their static type is known (see the
+           ty_is_object branch above). Reading parent_cls_name on an
+           arbitrary poly-tagged object is a wrong-offset read (segfault). */
         buf_puts(b, "sp_raise_poly("); emit_boxed(c, av[0], b); buf_puts(b, ")");
       }
       else {
