@@ -150,49 +150,25 @@ void sp_exc_gc_scan(void *p) {
   sp_mark_rbval(e->xkey);
   sp_mark_rbval(e->xrecv);
   /* backtrace storage: the base sp_Exception's `backtrace` field is
-   * NOT in the user subclass struct (the user struct carries only the
-   * 8-field shared base prefix and stops there), so we cannot read
-   * `e->backtrace` on a user subclass -- it would be past the end of
-   * the struct. The user subclass's own GC scan (emitted by the
-   * codegen for ivar-bearing classes) is responsible for marking
-   * whatever slot the class uses for backtrace storage. The
-   * `sp_exc_gc_scan` registered for nivars==0 subclasses (those
-   * allocated via sp_exc_new_sub) marks nothing beyond the base
-   * fields; such subclasses don't have a backtrace storage slot at
-   * all, and any call to #set_backtrace on them would be UB (no
-   * slot to write to). User exception classes that need
-   * set_backtrace should define their own method; classes that
-   * don't can simply not call it. */
-  if (e->parent_cls_name == NULL) {
-    if (e->backtrace) sp_gc_mark(e->backtrace);
-  }
+   * mirrored by every user exception subclass struct (codegen emits
+   * it in the struct definition for ivar-bearing classes; nivars==0
+   * subclasses are typedef'd to sp_Exception). So `e->backtrace` is
+   * valid for both shapes and the GC can mark it directly. */
+  if (e->backtrace) sp_gc_mark(e->backtrace);
   /* cls_name/parent_cls_name point into rodata -- not GC-managed strings */
 }
 
 /* Exception#set_backtrace: replace the stored backtrace with `bt`.
+ * The base sp_Exception's `backtrace` field is mirrored by every
+ * user exception subclass struct (codegen emits it in the struct
+ * definition for ivar-bearing classes; nivars==0 subclasses are
+ * typedef'd to sp_Exception). So `e->backtrace` is valid for both
+ * shapes, no offset arithmetic needed.
+ *
  * The codegen gate at src/codegen_call.c stands down for any user
  * class that defines its own #set_backtrace, so this builtin only
  * runs for the base sp_Exception and for user subclasses that did
- * NOT define their own. For the user-subclass case the storage
- * location is the first user ivar, which sits right after the 8
- * shared base-prefix fields (cls_name through xrecv). Using
- * offsetof(sp_Exception, has_recv) names that location without
- * hardcoding a byte count, so struct reordering is safe.
- *
- * The class MUST have at least one user ivar for the user-subclass
- * arm to be valid -- a nivars==0 subclass (allocated via
- * sp_exc_new_sub) has no storage slot, and writing here would be
- * past the end of the struct. User exception classes that need
- * set_backtrace should define their own method; classes that
- * don't can simply not call it.
- *
- * Shared-accessor contract: this runtime and the codegen getter
- * (src/codegen_call.c, around the backtrace arm) must use the
- * same storage location for each shape. The getter reads the
- * same offsetof-based slot for ivar-bearing subclasses; for
- * nivars==0 subclasses the getter falls through to
- * sp_backtrace_captured() (empty), which is consistent with
- * having nowhere to store the backtrace.
+ * NOT define their own.
  *
  * CRuby returns the array; the AOT codegen reads the receiver from
  * this return value (the sp_RbVal of the stored array) to satisfy
@@ -200,20 +176,7 @@ void sp_exc_gc_scan(void *p) {
 sp_RbVal sp_Exception_set_backtrace(sp_Exception *e, sp_StrArray *bt) {
   SP_GC_ROOT(e);
   SP_GC_ROOT(bt);
-  if (e->parent_cls_name == NULL) {
-    e->backtrace = bt;
-  } else {
-    /* User exception subclass that did NOT define its own
-     * #set_backtrace (the chain check in the codegen arm stands
-     * down for any class that does). Storage: first user ivar,
-     * at offsetof(sp_Exception, has_recv) -- the slot right after
-     * the 8-field shared base prefix every user exception subclass
-     * carries. The class must have at least one user ivar for
-     * this to be valid; nivars==0 subclasses have nowhere to
-     * store the backtrace and should define their own
-     * #set_backtrace. */
-    *(sp_StrArray **)((char *)e + offsetof(sp_Exception, has_recv)) = bt;
-  }
+  e->backtrace = bt;
   return bt ? sp_box_obj(bt, SP_BUILTIN_STR_ARRAY) : sp_box_nil();
 }
 /* cls_name is rodata -- every caller passes a bare literal, and the scan below

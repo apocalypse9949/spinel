@@ -5417,9 +5417,10 @@ void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
        sp_Exception (cls_name/parent_cls_name/msg/cause/result/xname/xkey/
        xrecv) -- a common initial sequence -- so every `(sp_Exception *)` cast
        in the raise/rescue and message machinery stays valid, with the ivar
-       fields after (#1415). Every base member must be mirrored: the rescue
-       machinery and the GC scan / constructor write them through the base
-       cast, so omitting one would alias (and overrun into) the first ivar. */
+       fields after (#1415). Every base member up through `backtrace` must
+       be mirrored: the rescue machinery, the GC scan, and #set_backtrace
+       write/read through the base cast, so omitting one would alias
+       (and overrun into) the first ivar. */
     if (ci->nivars == 0) return;
     buf_printf(b, "struct sp_%s_s {\n", ci->c_name);
     buf_puts(b, "  const char *cls_name;\n");
@@ -5430,6 +5431,14 @@ void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
     buf_puts(b, "  sp_RbVal xname;\n");
     buf_puts(b, "  sp_RbVal xkey;\n");
     buf_puts(b, "  sp_RbVal xrecv;\n");
+    /* Trailing base fields: the GC scan reads has_recv/has_key/priv_call
+       through the base cast, and #set_backtrace writes `backtrace` through
+       the same cast. Mirror them so the offsets match sp_Exception exactly
+       and the cast stays valid for ivar-bearing subclasses too. */
+    buf_puts(b, "  sp_bool has_recv;\n");
+    buf_puts(b, "  sp_bool has_key;\n");
+    buf_puts(b, "  sp_bool priv_call;\n");
+    buf_puts(b, "  sp_StrArray *backtrace;\n");
     for (int i = 0; i < ci->nivars; i++) {
       TyKind t = ci->ivar_types[i];
       /* belt and suspenders: analyze widens void/nil ivar slots to poly
@@ -5490,6 +5499,7 @@ void emit_class_scan(Compiler *c, ClassInfo *ci, Buf *b) {
     buf_puts(b, "  sp_mark_rbval(o->xname);\n");
     buf_puts(b, "  sp_mark_rbval(o->xkey);\n");
     buf_puts(b, "  sp_mark_rbval(o->xrecv);\n");
+    buf_puts(b, "  if (o->backtrace) sp_gc_mark(o->backtrace);\n");
   }
   for (int i = 0; i < ci->nivars; i++) {
     TyKind t = ci->ivar_types[i];

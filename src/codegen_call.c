@@ -19583,7 +19583,15 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         return;
       }
       if (sp_streq(name, "backtrace")) {
-        buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_puts(b, "), (sp_StrArray *)0)");
+        int tbt = ++g_tmp;
+        buf_printf(b, "({ sp_Exception *_t%d = (sp_Exception *)(", tbt);
+        emit_expr(c, recv, b);
+        /* The base sp_Exception's `backtrace` field is mirrored by
+         * every user exception subclass struct (codegen emits it in
+         * the struct definition for ivar-bearing classes; nivars==0
+         * subclasses are typedef'd to sp_Exception). So `_t->backtrace`
+         * is valid for both shapes. */
+        buf_printf(b, "); sp_StrArray *_t%d_bt = _t%d->backtrace; _t%d_bt ? _t%d_bt : sp_backtrace_captured(); })", tbt, tbt, tbt, tbt);
         return;
       }
       { int tfm = ++g_tmp;
@@ -19659,15 +19667,15 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       int t = ++g_tmp;
       buf_printf(b, "({ sp_Exception *_t%d = (sp_Exception *)(", t);
       emit_expr(c, recv, b);
-      /* For a user subclass, `_t->backtrace` reads past the end of the
-       * struct (undefined). Read the first user ivar at
-       * offsetof(sp_Exception, has_recv) -- the slot right after the
-       * 8-field shared base prefix (cls_name through xrecv) every user
-       * exception subclass carries. Named via offsetof so struct
-       * reordering is safe; the same offset is used by the setter
-       * (sp_Exception_set_backtrace in lib/sp_exc.c) and the GC scan
-       * (sp_exc_gc_scan in lib/sp_exc.c). */
-      buf_printf(b, "); sp_StrArray *_t%d_bt = _t%d->parent_cls_name ? *(sp_StrArray **)((char *)_t%d + offsetof(sp_Exception, has_recv)) : _t%d->backtrace; _t%d_bt ? _t%d_bt : sp_backtrace_captured(); })", t, t, t, t, t, t);
+      /* The base sp_Exception's `backtrace` field is mirrored by
+       * every user exception subclass struct (codegen emits it in
+       * the struct definition for ivar-bearing classes; nivars==0
+       * subclasses are typedef'd to sp_Exception). So `_t->backtrace`
+       * is valid for both shapes; no offset arithmetic, no risk
+       * of reading an unrelated ivar as a backtrace. The chain
+       * check above already stood down for any class that defines
+       * its own #backtrace. */
+      buf_printf(b, "); sp_StrArray *_t%d_bt = _t%d->backtrace; _t%d_bt ? _t%d_bt : sp_backtrace_captured(); })", t, t, t, t);
       return;
     }
   }
