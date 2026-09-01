@@ -5724,10 +5724,17 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *re
     buf_printf(b, "sp_Exception *_ce_%d = sp_exc_obj[sp_exc_top] ? (sp_Exception *)sp_exc_obj[sp_exc_top]"
                   " : sp_exc_new_for_catch(_rcls_%d, _rmsg_%d);\n", rc, rc, rc);
   emit_indent(b, indent);
+  /* A rescued exception's #backtrace returns [] (not nil) so that
+   * chained methods like .first / .length / .empty? work without nil
+   * checks. Spinel doesn't track per-exception frames (#895), so
+   * the backtrace is an empty array unless the raise site attached
+   * one. The carried object (sp_exc_obj slot) may already have a
+   * backtrace from set_backtrace; only fill it when the catch site
+   * created a fresh exception. */
+  buf_printf(b, "if (sp_exc_obj[sp_exc_top] == NULL && _ce_%d->backtrace == NULL) _ce_%d->backtrace = sp_StrArray_new();\n", rc, rc);
+  emit_indent(b, indent);
   /* an exception never loses a cause it already carries (#3745) */
   buf_printf(b, "if (!_ce_%d->cause) _ce_%d->cause = (sp_Exception *)sp_pending_cause; sp_pending_cause = NULL;\n", rc, rc);
-  emit_indent(b, indent);
-  buf_printf(b, "sp_rescue_push((void *)_ce_%d);\n", rc);
   g_rescue_save_stack[g_rescue_save_depth++] = (RescueSave){ g_exc_frame_depth };
   if (has_bind) {
     emit_indent(b, indent);
