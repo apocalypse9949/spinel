@@ -5728,10 +5728,13 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *re
    * chained methods like .first / .length / .empty? work without nil
    * checks. Spinel doesn't track per-exception frames (#895), so
    * the backtrace is an empty array unless the raise site attached
-   * one. The carried object (sp_exc_obj slot) may already have a
-   * backtrace from set_backtrace; only fill it when the catch site
-   * created a fresh exception. */
-  buf_printf(b, "if (sp_exc_obj[sp_exc_top] == NULL && _ce_%d->backtrace == NULL) _ce_%d->backtrace = sp_StrArray_new();\n", rc, rc);
+   * one. The fill is idempotent: the catch-site object (whether
+   * carried from the raise or materialized here) starts with
+   * backtrace == NULL and set_backtrace explicitly writes it.
+   * Skipping the backfill when the carry slot is present would
+   * leave a re-raised object with whatever backtrace its previous
+   * owner set, which is what #895 documents. */
+  buf_printf(b, "if (_ce_%d->backtrace == NULL) _ce_%d->backtrace = sp_StrArray_new();\n", rc, rc);
   emit_indent(b, indent);
   /* Push the rescue variable onto sp_exc_handling so $! (which reads
    * sp_cur_handled) points at the same object the arm bound to `e`.
