@@ -149,17 +149,22 @@ void sp_exc_gc_scan(void *p) {
   sp_mark_rbval(e->xname);
   sp_mark_rbval(e->xkey);
   sp_mark_rbval(e->xrecv);
-  /* backtrace storage: base sp_Exception uses the `backtrace` field;
-   * user subclasses store it in their first user ivar at
-   * offsetof(sp_Exception, has_recv) -- the slot right after the
-   * 8-field shared base prefix. The user struct is smaller than the
-   * base, so reading `e->backtrace` on a user subclass is past the
-   * end of the struct (UB). */
+  /* backtrace storage: the base sp_Exception's `backtrace` field is
+   * NOT in the user subclass struct (the user struct carries only the
+   * 8-field shared base prefix and stops there), so we cannot read
+   * `e->backtrace` on a user subclass -- it would be past the end of
+   * the struct. The user subclass's own GC scan (emitted by the
+   * codegen for ivar-bearing classes) is responsible for marking
+   * whatever slot the class uses for backtrace storage. The
+   * `sp_exc_gc_scan` registered for nivars==0 subclasses (those
+   * allocated via sp_exc_new_sub) marks nothing beyond the base
+   * fields; such subclasses don't have a backtrace storage slot at
+   * all, and any call to #set_backtrace on them would be UB (no
+   * slot to write to). User exception classes that need
+   * set_backtrace should define their own method; classes that
+   * don't can simply not call it. */
   if (e->parent_cls_name == NULL) {
     if (e->backtrace) sp_gc_mark(e->backtrace);
-  } else {
-    sp_StrArray *bt = *(sp_StrArray **)((char *)e + offsetof(sp_Exception, has_recv));
-    if (bt) sp_gc_mark(bt);
   }
   /* cls_name/parent_cls_name point into rodata -- not GC-managed strings */
 }
@@ -174,13 +179,20 @@ void sp_exc_gc_scan(void *p) {
  * offsetof(sp_Exception, has_recv) names that location without
  * hardcoding a byte count, so struct reordering is safe.
  *
+ * The class MUST have at least one user ivar for the user-subclass
+ * arm to be valid -- a nivars==0 subclass (allocated via
+ * sp_exc_new_sub) has no storage slot, and writing here would be
+ * past the end of the struct. User exception classes that need
+ * set_backtrace should define their own method; classes that
+ * don't can simply not call it.
+ *
  * Shared-accessor contract: this runtime and the codegen getter
  * (src/codegen_call.c, around the backtrace arm) must use the
  * same storage location for each shape. The getter reads the
- * same offsetof-based slot; this setter writes there too. If
- * either side changes, update both.
- *
- * GC marking: sp_exc_gc_scan visits the right slot for each shape.
+ * same offsetof-based slot for ivar-bearing subclasses; for
+ * nivars==0 subclasses the getter falls through to
+ * sp_backtrace_captured() (empty), which is consistent with
+ * having nowhere to store the backtrace.
  *
  * CRuby returns the array; the AOT codegen reads the receiver from
  * this return value (the sp_RbVal of the stored array) to satisfy
@@ -196,7 +208,10 @@ sp_RbVal sp_Exception_set_backtrace(sp_Exception *e, sp_StrArray *bt) {
      * down for any class that does). Storage: first user ivar,
      * at offsetof(sp_Exception, has_recv) -- the slot right after
      * the 8-field shared base prefix every user exception subclass
-     * carries. */
+     * carries. The class must have at least one user ivar for
+     * this to be valid; nivars==0 subclasses have nowhere to
+     * store the backtrace and should define their own
+     * #set_backtrace. */
     *(sp_StrArray **)((char *)e + offsetof(sp_Exception, has_recv)) = bt;
   }
   return bt ? sp_box_obj(bt, SP_BUILTIN_STR_ARRAY) : sp_box_nil();
