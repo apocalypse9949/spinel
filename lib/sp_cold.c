@@ -414,12 +414,16 @@ static void sp_glob_walk(const char *fsdir, const char *outprefix,
       /* A trailing ** answers every entry beneath it, directories included --
          `Dir.glob("a/**")` is ["a/b", "a/top.rs"] in CRuby. */
       if (last) sp_glob_push(a, outpath);
-      if (sp_glob_is_dir(fspath)) {
-        char sub[2048];
-        snprintf(sub, sizeof sub, "%s%s/", outprefix, name);
-        /* stay on the same component: ** consumes any number of levels */
-        sp_glob_walk(fspath, sub, comps, ncomp, ci, a);
-      }
+      /* lstat, not stat: a recursive walk does not follow a symlinked
+         directory, which is CRuby's rule and what keeps a link back up the
+         tree from looping forever (#4258). */
+      { struct stat lst;
+        if (lstat(fspath, &lst) == 0 && S_ISDIR(lst.st_mode)) {
+          char sub[2048];
+          snprintf(sub, sizeof sub, "%s%s/", outprefix, name);
+          /* stay on the same component: ** consumes any number of levels */
+          sp_glob_walk(fspath, sub, comps, ncomp, ci, a);
+        } }
     }
     closedir(d);
     return;
@@ -487,6 +491,14 @@ static void sp_dir_glob_one(const char *pattern, sp_StrArray *a) {
   snprintf(buf, sizeof buf, "%s", pattern);
   char *comps[64];
   int ncomp = 0;
+  /* A pattern ending in a separator names DIRECTORIES, and CRuby keeps the
+     separator on the answer: "a/" is ["a/"] and "a/t.rs/" is [] because a
+     regular file is not one. Without this the trailing separator was dropped
+     as an empty component and a file answered as if it were a directory
+     (#4258). */
+  size_t blen = strlen(buf);
+  int dir_only = blen > 1 && buf[blen - 1] == '/';
+  if (dir_only) buf[blen - 1] = 0;
   int absolute = (buf[0] == '/');
   char *p = buf + (absolute ? 1 : 0);
   for (char *tok = p; ncomp < 64; ) {
@@ -497,7 +509,34 @@ static void sp_dir_glob_one(const char *pattern, sp_StrArray *a) {
     tok = sl + 1;
   }
   if (ncomp == 0) return;
-  sp_glob_walk(absolute ? "/" : "", absolute ? "/" : "", comps, ncomp, 0, a);
+  /* Stripping the separator turned a trailing recursive component into the
+     one-level form; it is the SEPARATOR that makes it descend, so put the
+     level back by asking for everything under it. */
+  char dstar[3] = "*";
+  if (dir_only && ncomp > 0 && strcmp(comps[ncomp - 1], "**") == 0 && ncomp < 64) {
+    comps[ncomp++] = dstar;   /* ** + / + *  -- every entry at every depth */
+  }
+  if (!dir_only) { sp_glob_walk(absolute ? "/" : "", absolute ? "/" : "", comps, ncomp, 0, a); return; }
+  /* A symlink to a directory IS one of the answers for a non-recursive form
+     ("*" + SEP lists it) and is not for the recursive one, which does not
+     follow links at all -- the same split the walk itself makes. */
+  { int recursive = 0;
+    for (int i = 0; i < ncomp; i++) if (strcmp(comps[i], "**") == 0) recursive = 1;
+    sp_StrArray *tmp = sp_StrArray_new();
+    SP_GC_ROOT(tmp);
+    sp_glob_walk(absolute ? "/" : "", absolute ? "/" : "", comps, ncomp, 0, tmp);
+    for (sp_int i = 0; i < tmp->len; i++) {
+      const char *e = tmp->data[i];
+      /* lstat, for the reason the recursive walk uses it: a symlink to a
+         directory is not one of the directories this form answers. */
+      struct stat lst;
+      if (!e) continue;
+      if (recursive) { if (lstat(e, &lst) != 0 || !S_ISDIR(lst.st_mode)) continue; }
+      else if (!sp_glob_is_dir(e)) continue;
+      char withslash[2048];
+      snprintf(withslash, sizeof withslash, "%s/", e);
+      sp_glob_push(a, withslash);
+    } }
 }
 
 /* CRuby expands `{a,b}` before matching, and the system matcher does not do it
@@ -551,6 +590,17 @@ sp_StrArray *sp_dir_glob(const char *pattern) {
   if (!pattern) return a;
   sp_dir_glob_braces(pattern, a, 0);
   sp_StrArray_sort_bang(a);
+  /* Two or more recursive components can reach the same path by different
+     splits -- "a" + SEP + "**" + SEP + "**" + SEP + "*.rs" found each file
+     once per way of dividing the levels between them -- and CRuby answers a
+     path once. The list is sorted, so equal entries are adjacent (#4258). */
+  { sp_int w = 0;
+    for (sp_int r = 0; r < a->len; r++) {
+      if (w > 0 && a->data[r] && a->data[w - 1] &&
+          sp_str_cmp_bytes(a->data[w - 1], a->data[r]) == 0) continue;
+      a->data[w++] = a->data[r];
+    }
+    a->len = w; }
   return a;
 }
 
