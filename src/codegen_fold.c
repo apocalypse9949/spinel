@@ -7059,6 +7059,22 @@ int rest_shortfall_required(Compiler *c, Scope *m) {
   return nreq;
 }
 
+/* The count a call with a trailing splat supplies, in a temp: `lead` positional
+   arguments plus whatever the array holds. */
+static int emit_rest_given_count(int lead, int splat_tmp) {
+  int gv = ++g_tmp;
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_int _t%d = %d + (_t%d ? _t%d->len : 0);\n", gv, lead, splat_tmp, splat_tmp);
+  return gv;
+}
+/* The run-time half of the rest shortfall check: refuse the measured count. */
+static void emit_rest_shortfall_raise(int given_tmp, int req) {
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre,
+             "if (_t%d < %d) sp_raise_cls(\"ArgumentError\", sp_sprintf(\"wrong number of arguments (given %%lld, expected %d+)\", (long long)_t%d));\n",
+             given_tmp, req, req, given_tmp);
+}
+
 void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lead, Buf *out) {
   Scope *m = &c->scopes[callee_idx];
   const NodeTable *nt = c->nt;
@@ -7268,6 +7284,13 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", splat_tmp);
           free(anon.p);
+          /* A rest target's shortfall, when the count is in the splat: the
+             same rule the static check below applies, judged at run time. */
+          if (m->rest_idx >= 0 && kwh < 0 && k == pos_argc - 1) {
+            int rreq = rest_shortfall_required(c, m);
+            if (rreq >= 0)
+              emit_rest_shortfall_raise(emit_rest_given_count(splat_idx, splat_tmp), rreq);
+          }
           /* Arity check: splatting into a fixed-arity (no-rest) method must
              supply a valid element count, else CRuby raises ArgumentError.
              Only emit when the splat is the last positional group, so the
@@ -7588,6 +7611,23 @@ int dispatch_impl_count(Compiler *c, int cid, const char *name) {
   return n;
 }
 
+/* The smallest count any implementation this dispatch may enter requires of a
+   rest-parameter call, or -1 when one of them binds by other rules and stands
+   the check down. A switch cannot know which arm it takes, so the arm that
+   asks least sets the bar; a direct call reads its own target instead. */
+static int dispatch_min_rest_required(Compiler *c, int cid, const char *name) {
+  int req = -1, seen = 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    if (!is_descendant(c, k, cid)) continue;
+    int kmi = comp_method_in_chain(c, k, name, NULL);
+    if (kmi < 0) continue;
+    int kreq = rest_shortfall_required(c, &c->scopes[kmi]);
+    if (kreq < 0) return -1;
+    if (!seen || kreq < req) { req = kreq; seen = 1; }
+  }
+  return seen ? req : -1;
+}
+
 /* Append `, <arg>` for dispatch arm `arm`'s parameter `a`, coercing the shared
    pre-evaluated temp `atmp[a]` (of C type `from`) to that arm's declared param
    type: a concrete value flowing into an sp_RbVal (untyped/poly) param is boxed,
@@ -7638,6 +7678,20 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
 
   int argc = 0;
   const int *argv = argsNode >= 0 ? nt_arr(nt, argsNode, "arguments", &argc) : NULL;
+  /* Force a runtime switch when there is no base implementation (m == NULL):
+     a template method defined only in subclasses cannot be called directly as
+     sp_<base>_<name>, so even a single descendant impl must dispatch virtually. */
+  int impl_n = dispatch_impl_count(c, cid, name);
+  /* A void/nil-returning method that subclasses override must still dispatch on
+     the runtime class -- an implicit-self call to it from a base method (e.g.
+     `def run; validate; end` where each subclass overrides `validate`) would
+     otherwise bind statically to the base impl and skip the override (#1443).
+     The GCC statement-expression wrapper can't declare a `void` result, so a
+     void dispatch uses a dummy int temp (its value is discarded). */
+  int ret_is_void = (ret == TY_VOID || ret == TY_NIL);
+  TyKind disp_ret = ret_is_void ? TY_INT : ret;
+  int virtual = (is_scalar_ret(ret) || ret_is_void) && (impl_n > 1 || (!m && impl_n >= 1));
+
   /* Arity check, the same one the free-function path already made: an over- or
      under-supplied instance call went through with the extra arguments simply
      dropped (#3677). Static shapes only -- any splat, keyword hash, rest or
@@ -7688,6 +7742,50 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
       sp_streq(nt_type(nt, argv[argc - 1]), "KeywordHashNode")) {
     kwh_d = argv[argc - 1]; pos_argc_d = argc - 1;
   }
+  /* The count a rest-parameter target refuses for lack of arguments, by the
+     rule the by-name lowering follows: a rest lifts the upper bound, not the
+     requirement below it, and `P.new.m` on `def m(x, *y)` ran the body with a
+     padded x. A direct call knows its target and is judged by that method
+     alone. A switch may enter any arm below the receiver's static class, and an
+     override with a default where the base has a required parameter takes a
+     call the base refuses -- so a switch is judged by the smallest count its
+     arms require, and one arm that binds by other rules (a keyword parameter,
+     a synthesized one) stands the check down. */
+  int rest_req_d = virtual ? dispatch_min_rest_required(c, cid, name)
+                           : (m ? rest_shortfall_required(c, m) : -1);
+  /* The parameters AFTER the rest are the call's last arguments -- as long as
+     those can be named here. An argument that spreads at run time (a splat, a
+     forwarded `...`), or a keyword hash that degrades into one more positional
+     at the tail, leaves their positions to a length only the call knows. The
+     binding stays as it was in that case: the rest takes everything spread and
+     each post its default, rather than a post fed the spreading node itself,
+     which is not one argument at all. */
+  int posts_dyn_d = 0;
+  if (m && m->rest_idx >= 0 && m->npost_rest > 0 && kwh_d >= 0)
+    posts_dyn_d = 1;   /* the hash may degrade to one more positional at the tail */
+  if (argv && m && m->rest_idx >= 0 && m->npost_rest > 0 && !posts_dyn_d)
+    for (int k = pos_argc_d - m->npost_rest; k < pos_argc_d; k++) {
+      const char *at = k >= 0 ? nt_type(nt, argv[k]) : NULL;
+      if (at && (sp_streq(at, "SplatNode") || sp_streq(at, "ForwardingArgumentsNode")))
+        { posts_dyn_d = 1; break; }
+    }
+  /* An argument the static count cannot measure: a splat's own run-time check
+     below judges it, and a forwarded or double-splatted list stands the check
+     down. A block argument is counted here only because pos_argc_d counts it
+     as a positional. */
+  int dyn_argc_d = 0;
+  for (int k = 0; argv && k < argc && !dyn_argc_d; k++) {
+    const char *at = nt_type(nt, argv[k]);
+    if (!at) continue;
+    if (sp_streq(at, "SplatNode") || sp_streq(at, "ForwardingArgumentsNode") ||
+        sp_streq(at, "BlockArgumentNode")) dyn_argc_d = 1;
+    else if (sp_streq(at, "KeywordHashNode")) {
+      int en = 0; const int *els = nt_arr(nt, argv[k], "elements", &en);
+      for (int e = 0; e < en && !dyn_argc_d; e++)
+        if (els && nt_type(nt, els[e]) && sp_streq(nt_type(nt, els[e]), "AssocSplatNode"))
+          dyn_argc_d = 1;
+    }
+  }
   /* Materialize a forwarded `**hash` inside kwh_d so keyword params extract
      from it and a `**kwrest` callee param collects it -- the same handling
      emit_args_filled applies (previously this path dropped every keyword
@@ -7706,12 +7804,25 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
   const char *saved_self = g_self;
   /* A positional SplatNode `obj.f(*args)` expands across the fixed params, the
      same way emit_args_filled handles it for free-function calls: pre-evaluate
-     the array to a rooted temp and fill each param from it. Scoped to a fixed-
-     arity callee (no rest param). */
+     the array to a rooted temp and fill each param from it. A splat reaching a
+     rest parameter needs the same expansion for the fixed params ahead of it --
+     without it the array went into the first parameter whole, an ill-typed one
+     as a C build failure -- but only for `obj.m(*args)` outright. The
+     pre-evaluation hoists the operand, so an argument written to its left would
+     run after it; anything to its right slides by a length only the array
+     knows; a keyword hash beside it belongs at the rest's tail, which this
+     packing does not carry; and a target whose shortfall cannot be judged (a
+     keyword parameter, a synthesized one) would run padded where the call is
+     refused today. A splat at or past the rest slot needs no expansion at all:
+     the rest collection spreads the operand itself. */
   int splat_idx_d = -1, splat_tmp_d = -1; TyKind splat_at_d = TY_UNKNOWN;
-  for (int k = 0; m && m->rest_idx < 0 && k < pos_argc_d; k++) {
+  int rest_given_d = -1;   /* the measured count, refused after the arguments run */
+  for (int k = 0; m && k < pos_argc_d; k++) {
     if (argv && nt_type(nt, argv[k]) && sp_streq(nt_type(nt, argv[k]), "SplatNode") &&
-        k < m->nparams) {
+        (m->rest_idx >= 0
+           ? (k == 0 && pos_argc_d == 1 && kwh_d < 0 && k < m->rest_idx &&
+              !posts_dyn_d && rest_req_d >= 0)
+           : k < m->nparams)) {
       int inner = nt_ref(nt, argv[k], "expression");
       splat_at_d = inner >= 0 ? comp_ntype(c, inner) : TY_UNKNOWN;
       Buf anon; memset(&anon, 0, sizeof anon);
@@ -7739,8 +7850,14 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
         buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", splat_tmp_d);
         free(anon.p);
         /* Arity check when the splat is the last positional group: the total
-           given count is splat_idx + array length. */
-        if (k == pos_argc_d - 1) {
+           given count is splat_idx + array length. A rest target has no upper
+           bound, so only its shortfall is judged. */
+        /* measure here, where the array is; refuse below, once the other
+           arguments have run -- CRuby evaluates them all before the count is
+           judged, and this loop is ahead of them */
+        if (m->rest_idx >= 0 && rest_req_d >= 0 && kwh_d < 0 && k == pos_argc_d - 1)
+          rest_given_d = emit_rest_given_count(splat_idx_d, splat_tmp_d);
+        else if (m->rest_idx < 0 && k == pos_argc_d - 1) {
           int pos_required = 0, pos_params = 0;
           positional_arity(c, m, &pos_required, &pos_params);
           char expbuf[48];
@@ -7769,10 +7886,29 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
          unconsumed keyword hash degrades to one positional hash at the rest's
          tail -- the same rule the other call path follows. Dropping it here
          made `c.splat_only(id: :desc)` run with no arguments at all, silently,
-         while the identical top-level call kept it (#3503). */
-      emit_rest_pack_kwh(c, k, pos_argc_d, argv, rest_kwh_tail(c, m, kwh_d, pos_argc_d), &ab);
+         while the identical top-level call kept it (#3503). The parameters
+         AFTER the rest are the call's last arguments, so the rest stops before
+         them: it collected them too, and each post then read the argument one
+         place to its left. */
+      int rest_end_d = posts_dyn_d ? pos_argc_d : pos_argc_d - m->npost_rest;
+      if (splat_tmp_d >= 0)
+        emit_rest_from_splat_and_argv(splat_tmp_d, splat_at_d, k - splat_idx_d,
+                                      c, splat_idx_d + 1, rest_end_d, argv, &ab);
+      else
+        emit_rest_pack_kwh(c, k, rest_end_d, argv, rest_kwh_tail(c, m, kwh_d, pos_argc_d), &ab);
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "sp_PolyArray *_t%d = %s;\n", atmp[k], ab.p ? ab.p : "sp_PolyArray_new()");
+      /* The packed rest is a fresh array in a plain C temporary: a splat's
+         packing roots its accumulator only while it builds it, and the other
+         packing's shortcuts (a lone typed splat converted whole, an empty
+         rest) hand back an allocation with no root at all. Root it whenever
+         the call still has something to evaluate -- a parameter after the
+         rest, or a block literal -- because each of those allocates, and a
+         collected rest is recycled straight into the next array. */
+      if (k < np - 1 || blk_node >= 0) {
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", atmp[k]);
+      }
       atmp_ty[k] = TY_POLY_ARRAY;
     }
     else if (fwd_encl && fwd_base_d + k < fwd_encl->nparams) {
@@ -7803,6 +7939,21 @@ else {
          Mirrors the callee_param_is_declared_kwarg guard in emit_args_filled. */
       int is_declkw_d = m && callee_param_is_declared_kwarg(c, m, m->pnames[k]);
       int _sl = arg_slot_for_param(c, m, k, pos_argc_d);
+      /* a parameter after the rest is filled from the END of the call's
+         positionals -- the rest takes the middle (#3204's neighbour rule, the
+         one emit_args_filled and the inline lowerings already follow) */
+      int is_post_d = m && m->rest_idx >= 0 && m->npost_rest > 0 && !posts_dyn_d &&
+                      k > m->rest_idx && k <= m->rest_idx + m->npost_rest;
+      if (is_post_d) {
+        int aidx = pos_argc_d - m->npost_rest + (k - m->rest_idx - 1);
+        _sl = (aidx >= 0 && aidx < pos_argc_d) ? aidx : -1;
+      }
+      /* the posts are funded from the end, so the parameters ahead of the rest
+         reach only the arguments before them: an optional that read past that
+         point took the post's argument as well, binding it twice */
+      else if (m && m->rest_idx >= 0 && m->npost_rest > 0 && !posts_dyn_d &&
+               k < m->rest_idx && _sl >= pos_argc_d - m->npost_rest)
+        _sl = -1;
       int provided = kv >= 0 ? kv : ((_sl >= 0 && !is_declkw_d) ? argv[_sl] : -1);
       /* Options-hash idiom: a trailing keyword hash whose keys name no
          parameter collapses into the first unfilled positional param when
@@ -7823,8 +7974,11 @@ else {
         /* keyword param fed by a forwarded `**hash`: extract by name. */
         emit_ds_param_extract(c, m, k, ds_tmp_d, ds_type_d, &ab);
       }
-      else if (splat_tmp_d >= 0 && k >= splat_idx_d) {
-        /* fill this fixed param from the splatted array at offset k-splat_idx */
+      else if (splat_tmp_d >= 0 && k >= splat_idx_d && kv < 0 && !is_declkw_d &&
+               (m->rest_idx < 0 || k < m->rest_idx)) {
+        /* fill this fixed param from the splatted array at offset k-splat_idx.
+           Only the parameters ahead of a rest are filled this way: a keyword
+           binds by name and a post from the end of the call. */
         int off = k - splat_idx_d;
         TyKind set = ty_array_elem(splat_at_d);
         Buf eb; memset(&eb, 0, sizeof eb);
@@ -7889,6 +8043,17 @@ else {
     free(ab.p);
   }
 
+  /* Too few arguments for a rest-parameter target: CRuby's ArgumentError,
+     where the body ran with the missing parameters padded out. The raise sits
+     after the argument temps because CRuby evaluates a call's arguments before
+     the method refuses their count. */
+  int eff_pos_d = pos_argc_d + (kwh_d >= 0 ? 1 : 0);
+  if (rest_given_d >= 0) emit_rest_shortfall_raise(rest_given_d, rest_req_d);
+  if (rest_req_d >= 0 && !dyn_argc_d && eff_pos_d < rest_req_d) {
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_raise_cls(\"ArgumentError\", \"wrong number of arguments (given %d, expected %d+)\");\n",
+               eff_pos_d, rest_req_d);
+  }
   /* &block param that escapes: pre-evaluate the block as sp_Proc * temp.
      When the call site has no block, blk_tmp stays -1 and we pass NULL. */
   int blk_tmp = -1;
@@ -7908,20 +8073,6 @@ else {
 
   /* The aliased name may differ from the defining method's real name. */
   const char *mname = m ? m->name : name;
-
-  /* Force a runtime switch when there is no base implementation (m == NULL):
-     a template method defined only in subclasses cannot be called directly as
-     sp_<base>_<name>, so even a single descendant impl must dispatch virtually. */
-  int impl_n = dispatch_impl_count(c, cid, name);
-  /* A void/nil-returning method that subclasses override must still dispatch on
-     the runtime class -- an implicit-self call to it from a base method (e.g.
-     `def run; validate; end` where each subclass overrides `validate`) would
-     otherwise bind statically to the base impl and skip the override (#1443).
-     The GCC statement-expression wrapper can't declare a `void` result, so a
-     void dispatch uses a dummy int temp (its value is discarded). */
-  int ret_is_void = (ret == TY_VOID || ret == TY_NIL);
-  TyKind disp_ret = ret_is_void ? TY_INT : ret;
-  int virtual = (is_scalar_ret(ret) || ret_is_void) && (impl_n > 1 || (!m && impl_n >= 1));
 
   if (!virtual) {
     /* a value-type receiver is passed by value (no pointer cast) */
@@ -7954,6 +8105,18 @@ else {
        class can't be the receiver here anyway. Same guard as the poly-dispatch
        loops in codegen_call.c (issue #1583). */
     if (!scope_has_callable_symbol(c, kmi)) continue;
+    /* The count is judged again per arm, because the switch knows the receiver
+       the check above could only guess at: with arms that disagree -- an
+       override with a default where the base has a required parameter -- the
+       smallest requirement kept the call, and a receiver of the stricter class
+       then ran with a padded parameter. Each arm answers for its own method,
+       the way the class-method dispatch does. */
+    { int areq = !dyn_argc_d ? rest_shortfall_required(c, &c->scopes[kmi]) : -1;
+      if (areq >= 0 && eff_pos_d < areq) {
+        buf_printf(b, " case %d: sp_raise_cls(\"ArgumentError\", \"wrong number of arguments (given %d, expected %d+)\"); break;",
+                   k, eff_pos_d, areq);
+        continue;
+      } }
     TyKind arm_ret = (TyKind)c->scopes[kmi].ret;
     const char *kfn = mc(c->scopes[kmi].name);
     if (method_is_void(&c->scopes[kmi])) {
