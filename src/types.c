@@ -216,6 +216,19 @@ const char *ty_hash_cname(TyKind h) {
 }
 
 int ty_is_numeric(TyKind t) { return t == TY_INT || t == TY_BIGINT || t == TY_FLOAT; }
+/* Kinds that can never answer #call: composing one is CRuby's TypeError
+   (callable object is expected). A user object stays out -- it may define
+   call -- as do poly/unknown, whose value is decided at run time. */
+int ty_never_callable(TyKind t) {
+  return t == TY_INT || t == TY_FLOAT || t == TY_BIGINT || t == TY_RATIONAL ||
+         t == TY_COMPLEX || t == TY_STRING || t == TY_STRBUF ||
+         t == TY_SYMBOL || t == TY_BOOL ||
+         t == TY_NIL || t == TY_RANGE || t == TY_FLOAT_RANGE ||
+         t == TY_STR_RANGE || t == TY_REGEX || t == TY_TIME ||
+         t == TY_MATCHDATA || t == TY_EXCEPTION || t == TY_IO ||
+         t == TY_ENUMERATOR || ty_is_array(t) || ty_is_obj_array(t) ||
+         ty_is_hash(t);
+}
 int ty_is_array(TyKind t) {
   return t == TY_INT_ARRAY || t == TY_FLOAT_ARRAY ||
          t == TY_STR_ARRAY || t == TY_POLY_ARRAY || t == TY_INT_ARRAY_ARRAY;

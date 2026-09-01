@@ -1896,6 +1896,14 @@ static TyKind infer_call_inner(Compiler *c, int id) {
     if ((cr_p && (ca_p || cat == TY_POLY)) ||
         (ca_p && crt == TY_POLY && sp_streq(name, ">>")))
       return TY_PROC;
+    /* a statically non-callable operand still types as the composition:
+       the codegen arm raises CRuby's TypeError (callable object is
+       expected) in its place. A program that reopens a builtin with its
+       own #call disarms the rule -- 5.call works there, so composing a 5
+       must too. */
+    if ((cr_p || crt == TY_METHOD) && ty_never_callable(cat) &&
+        !an_user_defines_or_reads(c, "call"))
+      return TY_PROC;
   }
   /* Proc#to_proc is self (#3687) */
   if (recv >= 0 && rt == TY_PROC && argc == 0 && sp_streq(name, "to_proc")) return TY_PROC;

@@ -4879,7 +4879,11 @@ int emit_hash_call(Compiler *c, int id, Buf *b) {
         if (rt == TY_POLY_POLY_HASH) g_needs_proc_poly_argslot = 1;
         buf_printf(&g_proc_protos, "static sp_int _hashproc_%d(void *cap, sp_int argc, sp_int *args);\n", pn);
         buf_printf(&g_procs, "static sp_int _hashproc_%d(void *cap, sp_int argc, sp_int *args) {\n", pn);
-        buf_printf(&g_procs, "  if (argc < 1) return 0;\n");
+        /* the hash proc is a lambda: exactly one key, as CRuby's raises --
+           the old `argc < 1 -> return 0` left the return slot holding the
+           previous call's value */
+        buf_printf(&g_procs, "  if (argc != 1) sp_raise_cls(\"ArgumentError\","
+                   " sp_sprintf(\"wrong number of arguments (given %%lld, expected 1)\", (long long)argc));\n");
         buf_printf(&g_procs, "  sp_%sHash *_h = (sp_%sHash *)cap;\n", hn, hn);
         /* Universal return ABI: publish the boxed value into _sp_proc_poly_ret
            for every value type; the .call site reads the slot back. */
@@ -4890,7 +4894,9 @@ int emit_hash_call(Compiler *c, int id, Buf *b) {
         buf_puts(&g_procs, ";\n  return 0;\n}\n");
         buf_printf(b, "sp_proc_new_meta((void *)_hashproc_%d, (void *)(", pn);
         emit_expr(c, recv, b);
-        buf_puts(b, "), sp_hashproc_cap_scan, 1, FALSE, 1, NULL, NULL)");
+        /* CRuby's Hash#to_proc is a lambda: lambda? answers true and a
+           composed call enforces its 1-arity instead of reading a stale slot */
+        buf_puts(b, "), sp_hashproc_cap_scan, 1, TRUE, 1, NULL, NULL)");
         return 1;
       }
       if ((sp_streq(name, "dup") || sp_streq(name, "clone")) && argc == 0) {

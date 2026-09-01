@@ -159,6 +159,7 @@ static inline TyKind ty_poly_face_kind(unsigned owner) {
 
 const char *ty_name(TyKind t);         /* legacy string tag, for diagnostics */
 int ty_is_numeric(TyKind t);           /* INT or FLOAT */
+int ty_never_callable(TyKind t);       /* kind can never answer #call */
 TyKind ty_promote_numeric(TyKind a, TyKind b); /* fold-accumulator numeric promotion */
 int ty_is_array(TyKind t);
 /* Set while the type fixpoint iterates; defined in analyze.c. Declared here
