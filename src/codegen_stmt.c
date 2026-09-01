@@ -5733,6 +5733,14 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *re
    * created a fresh exception. */
   buf_printf(b, "if (sp_exc_obj[sp_exc_top] == NULL && _ce_%d->backtrace == NULL) _ce_%d->backtrace = sp_StrArray_new();\n", rc, rc);
   emit_indent(b, indent);
+  /* Push the rescue variable onto sp_exc_handling so $! (which reads
+   * sp_cur_handled) points at the same object the arm bound to `e`.
+   * The push is popped at arm exit (sp_rescue_sp-- below). The
+   * carried-object path (sp_exc_obj[sp_exc_top] != NULL) reuses
+   * the same object both for $! and for the rescue binding, so
+   * $!.equal?(e) is true. */
+  buf_printf(b, "sp_rescue_push((void *)_ce_%d);\n", rc);
+  emit_indent(b, indent);
   /* an exception never loses a cause it already carries (#3745) */
   buf_printf(b, "if (!_ce_%d->cause) _ce_%d->cause = (sp_Exception *)sp_pending_cause; sp_pending_cause = NULL;\n", rc, rc);
   g_rescue_save_stack[g_rescue_save_depth++] = (RescueSave){ g_exc_frame_depth };
