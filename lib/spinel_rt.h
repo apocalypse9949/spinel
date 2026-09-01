@@ -2410,6 +2410,14 @@ static sp_int sp_poly_length_m(sp_RbVal v) {
   if (v.tag == SP_TAG_NIL || v.tag == SP_TAG_INT || v.tag == SP_TAG_FLT ||
       v.tag == SP_TAG_BIGINT || v.tag == SP_TAG_BOOL || sp_poly_is_user_obj(v))
     sp_raise_poly_nomethod("length", v);
+  /* String#length is CHARACTERS. sp_poly_length answers the byte count, which
+     is what its container and iteration callers want and what a boxed string
+     reaching THIS entry must not get: the two agree on ASCII and part company
+     at the first wider character, so a poly-carried string reported 7 for the
+     five characters of "a - b" with an em dash (#4251). */
+  if (v.tag == SP_TAG_STR) return v.v.s ? sp_str_length(v.v.s) : 0;
+  if (v.tag == SP_TAG_OBJ && sp_poly_is_strbuf(v))
+    return sp_str_length(sp_String_cstr((sp_String *)v.v.p));
   return sp_poly_length(v);
 }
 /* `size` on a boxed receiver: a collection answers its length, but an Integer
@@ -2426,6 +2434,10 @@ static sp_int sp_poly_size(sp_RbVal v) {
     sp_int bytes = (bits + 7) / 8;
     return bytes < (sp_int)sizeof(sp_int) ? (sp_int)sizeof(sp_int) : bytes;
   }
+  /* String#size is String#length: characters, not bytes (#4251) */
+  if (v.tag == SP_TAG_STR) return v.v.s ? sp_str_length(v.v.s) : 0;
+  if (v.tag == SP_TAG_OBJ && sp_poly_is_strbuf(v))
+    return sp_str_length(sp_String_cstr((sp_String *)v.v.p));
   return sp_poly_length(v);
 }
 static sp_bool sp_poly_hash_subset(sp_RbVal a, sp_RbVal b, int strict) {
