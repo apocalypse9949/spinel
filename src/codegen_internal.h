@@ -356,6 +356,12 @@ extern int g_uses_threads;
 extern int g_has_user_cmp;
 extern int g_has_user_binop;
 extern int g_has_user_coerce;
+/* 1 if class k defines a #coerce this TU emits and can call: one parameter,
+   no rest, an array return -- the [other, self] pair, poly or homogeneously
+   typed. See analyze_util.c. */
+int class_coerce_emittable(Compiler *c, int k);
+int class_has_coerce_shape(Compiler *c, int k);
+int is_numeric_coerce_op(const char *op);
 extern int g_has_user_to_io;
 extern int g_gen_obj_hashkey; /* >=1 instantiated class defines #hash + #eql?: emit + install the obj hash/eql key hooks */
 extern int g_gen_obj_valeq;   /* >=1 instantiated Struct/Data class: emit + install the value-== hook so containers compare them by value */

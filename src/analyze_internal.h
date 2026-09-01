@@ -88,6 +88,9 @@ int is_arith_op(const char *op);
 int node_is_empty_container(const NodeTable *nt, int node);
 int bind_coerce_operator_params(Compiler *c);
 int is_cmp_op(const char *op);
+int is_numeric_coerce_op(const char *op);
+int class_coerce_emittable(Compiler *c, int k);
+int class_has_coerce_shape(Compiler *c, int k);
 int is_eq_op(const char *op);
 int is_void_call(const char *name);
 /* Resolve a struct member from a literal key node: a SymbolNode names a

@@ -5497,7 +5497,21 @@ else {
       int acls = ty_object_class(a0);
       if (comp_method_in_chain(c, acls, "coerce", NULL) >= 0) {
         int op_mi = comp_method_in_chain(c, acls, name, NULL);
-        if (op_mi >= 0) return (TyKind)c->scopes[op_mi].ret;
+        /* Only when the pair is of the object's own class does its operator
+           decide the type. The documented plain-number idiom never reaches
+           that method -- the pair's receiver is a Float -- so taking the
+           method's return there answered one operator from the class and
+           another from the pair. */
+        if (op_mi >= 0 && !class_has_coerce_shape(c, acls))
+          return (TyKind)c->scopes[op_mi].ret;
+        /* The standard idiom answers a pair of plain NUMBERS and defines no
+           operator of its own, so the result is whatever the pair computes --
+           known only at run time. Left UNKNOWN, the expression emitted a nil
+           and `5 + obj` answered nil instead of the coerced sum. The emittable
+           test is the one emit_numeric_coerce_call makes, so a #coerce this TU
+           cannot call keeps the type it had rather than promising a pair that
+           never gets computed. */
+        return TY_POLY;
       }
     }
     /* a poly operand makes the +,-,*,/ result poly: codegen lowers these to

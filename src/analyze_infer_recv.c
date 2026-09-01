@@ -217,6 +217,24 @@ int infer_numeric_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   if (args >= 0) argv = nt_arr(nt, args, "arguments", &argc);
   (void)argv; (void)recv; (void)nt;
   if (!name) return 0;
+  /* A numeric receiver and a coercing user object: the answer is whatever the
+     pair #coerce hands back computes, and that is a run-time class -- CRuby's
+     own `def coerce(v) = [2.0, v]` turns an Integer receiver's #modulo into a
+     Float. Typed from the receiver instead, the named methods reinterpreted
+     the boxed result under the wrong tag: 5.modulo(obj) read the bits of 2.0
+     as an Integer and printed 4611686018427387904. The comparisons keep their
+     bool and `<=>` its int, which the protocol cannot widen. This mirrors
+     emit_numeric_coerce_call's guard so the two agree on every shape. */
+  if (argc == 1 && recv >= 0 && is_numeric_coerce_op(name) &&
+      !is_cmp_op(name) && !sp_streq(name, "<=>") &&
+      nt_ref(nt, id, "block") < 0 &&
+      (rt == TY_INT || rt == TY_FLOAT || rt == TY_RATIONAL || rt == TY_BIGINT)) {
+    TyKind ac = comp_ntype(c, argv[0]);
+    if (ty_is_object(ac) && class_has_coerce_shape(c, ty_object_class(ac))) {
+      *out = TY_POLY;
+      return 1;
+    }
+  }
   if (rt == TY_INT && argc == 1 && comp_ntype(c, argv[0]) == TY_COMPLEX) {
     if (sp_streq(name, "+") || sp_streq(name, "-") || sp_streq(name, "*") || sp_streq(name, "/")) { *out = TY_COMPLEX; return 1; }
     if (sp_streq(name, "==") || sp_streq(name, "!=")) { *out = TY_BOOL; return 1; }
