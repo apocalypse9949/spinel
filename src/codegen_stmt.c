@@ -8416,7 +8416,13 @@ else {
           emit_indent(b, indent);
           buf_printf(b, "{ int _t%d[2]; sp_io_make_pipe(_t%d); ", tf, tf);
           buf_printf(b, "lv_%s = sp_io_fdopen(_t%d[0], \"r\"); ", rn0, tf);
-          buf_printf(b, "lv_%s = sp_io_fdopen(_t%d[1], \"w\"); }\n", wn0, tf);
+          /* the write end is sync in CRuby: a write reaches the descriptor at
+             once, so the reader (or an IO.select on it) sees it without a
+             flush. sp_io_pipe does the same for the non-destructured call
+             (#4263). */
+          buf_printf(b, "lv_%s = sp_io_fdopen(_t%d[1], \"w\"); "
+                        "if (lv_%s) { lv_%s->sync_on = 1; setvbuf(lv_%s->fp, NULL, _IONBF, 0); } }\n",
+                     wn0, tf, wn0, wn0, wn0);
           return;
         }
       }

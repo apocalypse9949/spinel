@@ -18,6 +18,13 @@ typedef struct {
   unsigned char bin_flag;      /* #binmode was called (#3131) */
   unsigned char no_autoclose;  /* #autoclose = false (#3131) */
   unsigned char is_sock;       /* a socket handle: writes bypass stdio (#2922) */
+  unsigned char sync_on;       /* #sync is true for this handle: a write reaches
+                                  the descriptor at once. A socket is always
+                                  sync (its writes bypass stdio); IO.pipe's
+                                  WRITE end is sync in CRuby too, and without
+                                  the flag a byte sat in stdio where a reader
+                                  -- or an IO.select on the other end -- could
+                                  not see it (#4263). */
   unsigned char frozen;        /* Object#freeze; kept here, not in the GC header,
                                   because the standard streams are static storage
                                   with no header to flip (sp_io_stdout) */

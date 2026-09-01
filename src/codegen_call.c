@@ -18436,7 +18436,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          sync = true -- and spinel's socket writes really do bypass stdio, so
          reporting false contradicted the implementation. Per-handle sync state
          is still not modelled beyond that (#2792). */
-      buf_printf(b, "((%s)->is_sock ? (sp_bool)1 : (sp_bool)0)", r);
+      buf_printf(b, "((%s)->is_sock || (%s)->sync_on ? (sp_bool)1 : (sp_bool)0)", r, r);
       free(rb.p); return;
     }
     if (sp_streq(name, "sync=") && argc >= 1) {
@@ -18444,7 +18444,8 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       buf_printf(b, "({ sp_bool _t%d = (", ts2);
       if (comp_ntype(c, argv[0]) == TY_BOOL) emit_expr(c, argv[0], b);
       else { buf_puts(b, "sp_poly_truthy("); emit_boxed(c, argv[0], b); buf_puts(b, ")"); }
-      buf_printf(b, "); if (_t%d) sp_File_flush(%s); _t%d; })", ts2, r, ts2);
+      buf_printf(b, "); %s->sync_on = _t%d ? 1 : 0; if (_t%d) sp_File_flush(%s); _t%d; })",
+                 r, ts2, ts2, r, ts2);
       free(rb.p); return;
     }
     if (sp_streq(name, "flush") || sp_streq(name, "binmode")) {
@@ -18565,12 +18566,15 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          sync reads the handle kind, sync= flushes on a truthy value and
          answers it (#4229) */
       else if (sp_streq(name, "sync") && argc == 0)
-        buf_printf(b, "(_t%d && _t%d->is_sock ? (sp_bool)1 : (sp_bool)0); })", tio2, tio2);
+        buf_printf(b, "(_t%d && (_t%d->is_sock || _t%d->sync_on) ? (sp_bool)1 : (sp_bool)0); })",
+                   tio2, tio2, tio2);
       else if (sp_streq(name, "sync=") && argc >= 1) {
         int ts3 = ++g_tmp;
         buf_printf(b, "sp_bool _t%d = sp_poly_truthy(", ts3);
         emit_boxed(c, argv[0], b);
-        buf_printf(b, "); if (_t%d) sp_File_flush(_t%d); _t%d; })", ts3, tio2, ts3);
+        buf_printf(b, "); if (_t%d) _t%d->sync_on = 1; else _t%d->sync_on = 0;"
+                      " if (_t%d) sp_File_flush(_t%d); _t%d; })",
+                   ts3, tio2, tio2, ts3, tio2, ts3);
       }
       /* read_nonblock / write_nonblock, the same answers the typed-receiver
          arms give: `exception: false` answers the wait symbol (read) or nil
