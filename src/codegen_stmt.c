@@ -5816,7 +5816,13 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
     /* Ensure clause present: use goto-based deferred-return mechanism so that
        a `return` inside the body still runs the ensure before leaving. */
     int eid = ++g_tmp;
-    int has_retval = (g_ret_type != TY_VOID && g_ret_type != TY_UNKNOWN);
+    /* A slot only exists for a kind with a C type to declare it with. VOID and
+       UNKNOWN were excluded; TY_NIL was not, and emit_ctype has no name for it,
+       so an ensure inside a nil-returning instantiation declared `void _retvN`
+       and the build stopped (#4245). nil carries no value to defer, exactly
+       like void. */
+    int has_retval = (g_ret_type != TY_VOID && g_ret_type != TY_UNKNOWN &&
+                      g_ret_type != TY_NIL && c_type_name(g_ret_type) != NULL);
     emit_indent(b, indent); buf_printf(b, "int _retf%d = 0;\n", eid);
     emit_indent(b, indent); buf_printf(b, "int _nxtf%d = 0; (void)_nxtf%d;\n", eid, eid);
     /* _excf/_excmsg/_exccls track an unhandled exception (no rescue) so
