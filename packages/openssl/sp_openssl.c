@@ -38,8 +38,8 @@
    #error says so rather than leaving a page of diagnostics about missing
    declarations. */
 #if defined(LIBRESSL_VERSION_NUMBER)
-# if LIBRESSL_VERSION_NUMBER < 0x3050000fL
-#  error "sp_openssl.c needs LibreSSL 3.5 or newer"
+# if LIBRESSL_VERSION_NUMBER < 0x3010000fL
+#  error "sp_openssl.c needs LibreSSL 3.1 or newer"
 # endif
 # define SP_SSL_PEER_CERT(ssl) SSL_get_peer_certificate(ssl)
 #elif OPENSSL_VERSION_NUMBER < 0x10100000L
