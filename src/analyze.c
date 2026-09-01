@@ -10094,14 +10094,19 @@ static int promote_shared_stored_strings(Compiler *c) {
        reads as a string append. Require the container to actually hold a
        string somewhere before treating the binding as a string alias. */
     if (!strbuf_container_stores_string(c, contn5, conts5)) continue;
-    /* ...and holds NOTHING BUT strings. A heterogeneous container passes the
-       test above on its string element while the local is bound from another
-       one: `box = [Frag.new(h), "s"]; f = box[0]; f.replace(sel)` bound f to a
-       string handle and ran String#replace on a Frag, answering the argument
-       (#4240). The alias only means what it says when every element is a
-       string. */
-    if (strbuf_container_stores_nonstring(c, contn5, conts5)) continue;
+    /* The stores that ARE strings become handles either way: the container's
+       own String element is mutated through it (`s = box[1]; s.replace(x)`),
+       and refusing that before the gate below left it a plain box, so the
+       mutation landed in a copy and the array never saw it. */
     changed |= strbuf_demand_container_stores(c, contn5, conts5);
+    /* The BINDING, though, only means what it says when the container holds
+       nothing but strings. A heterogeneous one passes the test above on its
+       string element while the local is bound from another: `box =
+       [Frag.new(h), "s"]; f = box[0]; f.replace(sel)` bound f to a string
+       handle and ran String#replace on a Frag, answering the argument
+       (#4240). Leave such a local poly -- the call site then dispatches on
+       the element's own class. */
+    if (strbuf_container_stores_nonstring(c, contn5, conts5)) continue;
     if (!c->strbuf_box[wv]) { c->strbuf_box[wv] = 1; changed = 1; }
     if (llv5->type != TY_POLY && (llv5->type != TY_STRBUF || !llv5->str_shared))
       {  llv5->type = TY_STRBUF; llv5->str_shared = 1; changed = 1;  }
