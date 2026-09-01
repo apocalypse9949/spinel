@@ -6103,6 +6103,38 @@ TyKind infer_uncached(Compiler *c, int id) {
               sp_streq(c->ffi_consts[fci].name, nm))
             return TY_INT;
     }
+    /* `klass::CONST` on a class VALUE: the constant is whichever the runtime
+       class owns, so the type is the one they agree on -- not the leaf-named
+       constant's, which is a different constant entirely (#4257). Same
+       candidate search the emitter makes. */
+    {
+      int dpar = nt_ref(nt, id, "parent");
+      const char *dpty = dpar >= 0 ? nt_type(nt, dpar) : NULL;
+      int dyn = dpar >= 0 && !(dpty && (sp_streq(dpty, "ConstantReadNode") ||
+                                        sp_streq(dpty, "ConstantPathNode")));
+      TyKind prt = dyn ? infer_type(c, dpar) : TY_UNKNOWN;
+      if (nm && dyn && (prt == TY_CLASS || prt == TY_POLY)) {
+        TyKind ct = TY_UNKNOWN; int nc = 0, uniform = 1;
+        for (int k = 0; k < c->nclasses; k++) {
+          const char *kn = c->classes[k].c_name;
+          if (!kn) continue;
+          char tail[512];
+          snprintf(tail, sizeof tail, "%s__%s", kn, nm);
+          size_t tl = strlen(tail);
+          for (int ci2 = 0; ci2 < c->nconsts; ci2++) {
+            const char *cn2 = c->consts[ci2].name;
+            size_t l2 = strlen(cn2);
+            if (l2 < tl || strcmp(cn2 + l2 - tl, tail) != 0) continue;
+            if (l2 > tl && strncmp(cn2 + l2 - tl - 2, "__", 2) != 0) continue;
+            if (nc == 0) ct = c->consts[ci2].type;
+            else if (c->consts[ci2].type != ct) uniform = 0;
+            nc++;
+            break;
+          }
+        }
+        if (nc > 0 && uniform && ct != TY_UNKNOWN) return ct;
+      }
+    }
     LocalVar *lv = nm ? comp_const(c, nm) : NULL;
     if (lv) return lv->type;
     /* A top-level scoped constant `::Name` (no parent) names the same thing as

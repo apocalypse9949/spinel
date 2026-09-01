@@ -2030,6 +2030,61 @@ void emit_expr(Compiler *c, int id, Buf *b) {
         return;
       }
     }
+    /* `klass::CODE` where the receiver is a VALUE rather than a written path:
+       which constant it names is a run-time question, and answering it with
+       the leaf-named one made two different receivers answer the same thing --
+       the top-level CODE for both Probe::Block and Probe::Region (#4257). The
+       constants themselves are already stored per owner (cst_Probe__Block__CODE
+       and cst_Probe__Region__CODE both exist), so switch on the class the
+       value carries and read the one that class owns. */
+    { TyKind prt = par_idc >= 0 ? comp_ntype(c, par_idc) : TY_UNKNOWN;
+    if (nm && par_idc >= 0 && !par_nmc && (prt == TY_CLASS || prt == TY_POLY)) {
+      /* A constant is stored under its OWNER's qualified spelling
+         (Probe__Block__CODE) while the class's c_name is its leaf (Block), so
+         the owner is found by asking each class whether a constant keyed
+         "<...>__<c_name>__<nm>" or "<c_name>__<nm>" exists. */
+      int ccls[64]; const char *ckey[64]; int nc = 0;
+      TyKind ct = TY_UNKNOWN; int uniform = 1;
+      for (int k = 0; k < c->nclasses && nc < 64; k++) {
+        const char *kn = c->classes[k].c_name;
+        if (!kn) continue;
+        char tail[512];
+        snprintf(tail, sizeof tail, "%s__%s", kn, nm);
+        size_t tl = strlen(tail);
+        const char *found = NULL; TyKind ft = TY_UNKNOWN;
+        for (int ci2 = 0; ci2 < c->nconsts; ci2++) {
+          const char *cn2 = c->consts[ci2].name;
+          size_t l2 = strlen(cn2);
+          if (l2 < tl || strcmp(cn2 + l2 - tl, tail) != 0) continue;
+          /* either the whole key, or a component edge before it */
+          if (l2 > tl && strncmp(cn2 + l2 - tl - 2, "__", 2) != 0) continue;
+          found = cn2; ft = c->consts[ci2].type; break;
+        }
+        if (!found) continue;
+        if (nc == 0) ct = ft;
+        else if (ft != ct) uniform = 0;
+        ccls[nc] = k; ckey[nc] = found; nc++;
+      }
+      if (nc > 0 && uniform && ct != TY_UNKNOWN) {
+        int tk = ++g_tmp, tr = ++g_tmp;
+        buf_printf(b, "({ sp_Class _t%d = ", tk);
+        /* a poly slot carries the class boxed; unwrap it to the same key */
+        if (prt == TY_POLY) { buf_puts(b, "sp_unbox_class("); emit_boxed(c, par_idc, b); buf_puts(b, ")"); }
+        else emit_expr(c, par_idc, b);
+        buf_puts(b, "; ");
+        emit_ctype(c, ct, b);
+        buf_printf(b, " _t%d = %s; switch (_t%d.cls_id) {", tr, default_value(ct), tk);
+        for (int i = 0; i < nc; i++)
+          buf_printf(b, " case %d: _t%d = cst_%s; break;", ccls[i], tr, ckey[i]);
+        /* A class with no such constant is CRuby's NameError, not the
+           leaf-named constant of some unrelated scope. */
+        buf_printf(b, " default: sp_raise_cls(\"NameError\", sp_sprintf("
+                      "\"uninitialized constant %%s::%s\", sp_class_to_s(_t%d))); break;",
+                   nm, tk);
+        buf_printf(b, " } _t%d; })", tr);
+        return;
+      }
+    } }
     LocalVar *cpcv = nm ? comp_const(c, nm) : NULL;
     if (cpcv && cpcv->type != TY_UNKNOWN) { buf_printf(b, "cst_%s", nm); return; }
     if (nm && sp_streq(nm, "ARGV")) { buf_puts(b, "sp_get_ARGV()"); return; }
