@@ -90,7 +90,11 @@ A dedicated monitor thread ("sysmon"), off the workers' backs, has three jobs:
 3. **Scheduler-aware I/O (design 8).** `sp_sched_wait_io(fd, events)` parks a
    green thread on an fd (POLLIN/POLLOUT), freeing its worker; the monitor
    rebuilds a `poll()` set (`g_pfds`) from the I/O-waiter list each tick and
-   wakes the thread when the fd is ready. A self-pipe (`g_sysmon_pipe`) wakes the
+   wakes the thread when the fd is ready. `sp_sched_wait_io_timeout(fd, events,
+   seconds)` is the same park with a `wake_deadline`: the monitor folds it into
+   its poll timeout like a sleeper's and wakes the thread with no revents when
+   the clock passes it, which is how `IO#wait_readable(t)` and a one-io
+   `IO.select` wait without pinning a worker. A self-pipe (`g_sysmon_pipe`) wakes the
    monitor out of `poll()` when the wait set changes.
 
 The monitor idles on `g_sysmon_cv` when there is nothing to watch and is woken

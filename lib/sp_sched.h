@@ -88,6 +88,16 @@ void       sp_sleep(sp_float s);   /* Kernel#sleep; relocated from spinel_rt.h t
    errored), 0 to give up (shutdown). Falls back to a plain blocking poll in the
    single-threaded build / before the monitor starts. */
 int        sp_sched_wait_io(int fd, short events);
+/* The same park with a deadline: wake when `fd` is ready for `events` OR when
+   `timeout_s` seconds have passed, whichever comes first (a negative timeout
+   is no deadline, i.e. sp_sched_wait_io). Returns 1 when the fd is ready or
+   errored, 0 on the deadline (or shutdown). The monitor watches the fd and the
+   clock together, so a timed readiness wait -- IO#wait_readable(t),
+   IO.select([io], nil, nil, t) -- costs the calling green thread, not its OS
+   worker; a blocking select(2) here pins the worker for the whole timeout,
+   and with every worker pinned the peer that would make the fd ready never
+   gets to run. */
+int        sp_sched_wait_io_timeout(int fd, short events, double timeout_s);
 sp_thread *sp_Thread_current(void);       /* Thread.current */
 sp_bool   sp_Thread_alive(sp_thread *t); /* #alive? */
 sp_bool   sp_Thread_set_report_default(sp_bool v);  /* Thread.report_on_exception= */

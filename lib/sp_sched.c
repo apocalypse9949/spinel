@@ -981,9 +981,24 @@ static void *sp_sysmon_main(void *arg) {
       }
     }
     /* Build the I/O poll set: slot 0 is the wake pipe (a registering thread
-       writes a byte to break us out of poll early), the rest are parked fds. */
+       writes a byte to break us out of poll early), the rest are parked fds.
+       A waiter with a deadline (sp_sched_wait_io_timeout) is woken here with
+       no revents once the clock passes it, and otherwise pulls the poll
+       timeout in like a sleeper does; wake_deadline is 0 for an open-ended
+       wait. */
     int npf = 1;
-    for (sp_thread *w = g_io_waiters; w; w = w->wait_next) {
+    for (sp_thread **wp = &g_io_waiters; *wp; ) {
+      sp_thread *w = *wp;
+      if (w->wake_deadline > 0.0 && w->wake_deadline <= now) {
+        *wp = w->wait_next; w->wait_next = NULL; w->wait_head = NULL;
+        w->io_revents = 0; w->io_fd = -1;
+        if (w == &g_main_thread) { w->state = SP_TH_RUNNABLE; SCHED_WAKE_ALL(); }
+        else if (w->off_cpu) { w->state = SP_TH_RUNNABLE; runq_requeue(w); sp_sched_wake_for(w); }
+        else w->wake_pending = 1;
+        continue;
+      }
+      if (w->wake_deadline > 0.0 && (nearest == 0.0 || w->wake_deadline < nearest)) nearest = w->wake_deadline;
+      wp = &w->wait_next;
       if (npf >= g_pcap) {
         int nc = g_pcap ? g_pcap * 2 : 16;
         struct pollfd *np = (struct pollfd *)realloc(g_pfds, sizeof(struct pollfd) * nc);
@@ -1092,8 +1107,21 @@ void sp_sched_sleep(double seconds) {
 }
 
 int sp_sched_wait_io(int fd, short events) {
+  return sp_sched_wait_io_timeout(fd, events, -1.0);
+}
+
+int sp_sched_wait_io_timeout(int fd, short events, double timeout_s) {
   if (fd < 0 || !g_sysmon_started) {   /* no monitor: plain blocking single-fd poll */
     struct pollfd pf; pf.fd = fd; pf.events = events; pf.revents = 0;
+    if (timeout_s >= 0.0) {
+      double until = sp_monotonic_now() + timeout_s;
+      for (;;) {
+        double left = until - sp_monotonic_now();
+        int ms = left > 0.0 ? (int)(left * 1000.0) + 1 : 0;
+        int pr = poll(&pf, 1, ms);
+        if (pr > 0) return 1; if (pr == 0) return 0; if (errno == EINTR) continue; return 0;
+      }
+    }
     for (;;) { int pr = poll(&pf, 1, 1000); if (pr > 0) return 1; if (pr == 0 || errno == EINTR) continue; return 0; }
   }
   SCHED_LOCK();
@@ -1105,6 +1133,9 @@ int sp_sched_wait_io(int fd, short events) {
     SCHED_LOCK();
   }
   self->io_fd = fd; self->io_events = events; self->io_revents = 0;
+  /* 0 = no deadline. Set explicitly: a stale deadline from an earlier
+     Kernel#sleep would otherwise read as this wait's. */
+  self->wake_deadline = timeout_s >= 0.0 ? sp_monotonic_now() + timeout_s : 0.0;
   self->state = SP_TH_BLOCKED;
   self->off_cpu = 0;
   self->wake_pending = 0;
