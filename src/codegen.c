@@ -3094,6 +3094,16 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
       if (comp_ty_value_obj(c, s->ret)) buf_printf(b, "(sp_%s){0};\n", c->classes[ty_object_class(s->ret)].c_name);
       else buf_puts(b, "NULL;\n"); /* unreachable default (object pointer) */
     }
+    /* Falling off the end answers nil. For most kinds the slot's default IS
+       what a caller reads back as nil, but a seeded nilable return has a
+       sentinel of its own: `() -> String?` pinned the slot to `const char *`
+       and the tail returned the empty string, so `.nil?` answered false and
+       `compact` kept it (#4250). */
+    else if (s->ret_rbs_nilable)
+      buf_printf(b, "%s;\n", s->ret == TY_INT   ? "SP_INT_NIL"
+                            : s->ret == TY_FLOAT ? "sp_float_nil()"
+                            : s->ret == TY_STRING ? "NULL"
+                                                  : default_value(s->ret));
     else buf_printf(b, "%s;\n", default_value(s->ret));
   }
   g_result_var = sv_rv2; g_result_poly = sv_rp2;

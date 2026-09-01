@@ -2614,7 +2614,11 @@ static void seed_method(Compiler *c, Scope *s, const char *ret_tok, char *ptypes
   TyKind rt = parse_seed_type(c, ret_tok);
   if (rt != TY_UNKNOWN) {
     s->ret = rt; s->ret_rbs_seeded = 1;
-    s->ret_rbs_nilable = g_seed_nilable && (rt == TY_INT || rt == TY_FLOAT);
+    /* `String?` is as nilable as `Integer?`: a bare `const char *` slot
+       carries nil as NULL, so the seed has to record it or the implicit
+       nil arm returns the empty string instead (#4250). */
+    s->ret_rbs_nilable = g_seed_nilable &&
+                         (rt == TY_INT || rt == TY_FLOAT || rt == TY_STRING);
     /* A memoized CONTAINER reader (`def self.table; @table ||= {}; end`) IS
        its ivar: pinning only the return left the slot poly, and the seeded
        narrowing then cast a PolyPolyHash payload to the declared hash -- a
@@ -11265,7 +11269,12 @@ static void mark_nullable_int_locals(Compiler *c) {
   /* An --rbs `Integer?` return is the seeded form of the same property the
      rounds below infer, so start the propagation from it. */
   for (int mi = 1; mi < c->nscopes; mi++)
-    if (c->scopes[mi].ret_rbs_nilable) c->scopes[mi].ret_nullable_int = 1;
+    /* nullable_int is the SCALAR-sentinel property; a nilable string is
+       recorded by ret_rbs_nilable alone (its nil is NULL, not a reserved
+       number), so it must not seed this flag. */
+    if (c->scopes[mi].ret_rbs_nilable &&
+        (c->scopes[mi].ret == TY_INT || c->scopes[mi].ret == TY_FLOAT))
+      c->scopes[mi].ret_nullable_int = 1;
   /* Method returns propagate through this fixpoint too (a pass-through method
      is nilable because its callee is), so the cap has to clear a chain of
      them rather than the single hop the local marking used to need. Every

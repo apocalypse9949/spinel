@@ -802,6 +802,12 @@ rbs-seed-test: $(SPINEL) $(RBS_EXTRACT_BIN) $(SP_RT_LIB)
 	  "$$tmp/mc" > "$$tmp/mc.out" 2>/dev/null; \
 	  cmp -s "$$tmp/mc.out" test/rbs-seed/module_clone_divergent.expected || { echo "rbs-seed-test: FAIL (#2008 module-clone divergent-hash output mismatch)"; diff -u test/rbs-seed/module_clone_divergent.expected "$$tmp/mc.out" || true; ok=0; }; \
 	else echo "rbs-seed-test: FAIL (#2008 module-clone divergent-hash C did not compile)"; ok=0; fi; \
+	$(SPINEL) test/rbs-seed/nilable_return.rb --rbs test/rbs-seed/sig \
+	  -c --no-line-map -o "$$tmp/nr.c" 2>/dev/null; \
+	if $(CC) -O0 -Ilib $(RBS_SEED_STRICT) "$$tmp/nr.c" $(SP_RT_LIB) $(LDFLAGS) -lm -o "$$tmp/nr" 2>"$$tmp/nr.err"; then \
+	  "$$tmp/nr" > "$$tmp/nr.out" 2>/dev/null; \
+	  cmp -s "$$tmp/nr.out" test/rbs-seed/nilable_return.expected || { echo "rbs-seed-test: FAIL (#4250 nilable seed erased the nil arm)"; diff -u test/rbs-seed/nilable_return.expected "$$tmp/nr.out" || true; ok=0; }; \
+	else echo "rbs-seed-test: FAIL (#4250 nilable_return C did not compile)"; ok=0; fi; \
 	$(SPINEL) test/rbs-seed/colliding_class_pin.rb --rbs test/rbs-seed/sig \
 	  -c --no-line-map -o "$$tmp/cp.c" 2>/dev/null; \
 	grep -Eq 'const char[[:space:]]*\*[[:space:]]*iv_rtag' "$$tmp/cp.c" || { echo "rbs-seed-test: FAIL (collision-renamed class seed not applied)"; ok=0; }; \
