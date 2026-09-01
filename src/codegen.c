@@ -9781,8 +9781,17 @@ char *codegen_program(const NodeTable *nt) {
     buf_printf(&b, " gv_%s = %s;\n", lv->name,
                lv->type == TY_RANGE ? "{0}" :
                lv->type == TY_POLY  ? "{SP_TAG_NIL, 0, {0}}" :
-               /* a global read before its first write is nil, and a nil string
-                  is NULL (the ivar convention), not the empty string */
+               /* A global read before its first write is nil, so the slot
+                  starts at the kind's nil SENTINEL. Only the string case knew
+                  that; an int-typed one started at 0, which reads back as the
+                  integer zero -- `if $pgid` was truthy on a global nothing had
+                  assigned, and `-$pgid` was -0 (#4248). */
+               lv->type == TY_INT   ? "SP_INT_NIL" :
+               /* TY_FLOAT has the same gap and no fix here: its nil sentinel
+                  is a bit pattern read through a union, which is not a
+                  constant expression, so a float global still starts at 0.0.
+                  Closing it needs a runtime initializer rather than a
+                  different literal. */
                lv->type == TY_STRING ? "NULL" : default_value(lv->type));
   }
   for (int i = 0; i < c->nconsts; i++) {

@@ -7863,12 +7863,14 @@ else {
       if (hrn && sp_streq(hrn, "Hash") && han == 0) v_empty_hash = 1;
     }
     if (vty && sp_streq(vty, "NilNode"))
-      /* A nil string is NULL, the way an ivar's is: default_value's "" is the
-         zero a fresh slot starts at, not nil, and `.nil?` compares against
-         NULL -- so assigning it answered false for a global that had just been
-         set to nil. */
-      buf_puts(b, lv->type == TY_RANGE ? "(sp_Range){0}"
-                : lv->type == TY_STRING ? "NULL" : default_value(lv->type));
+      /* Every nullable kind has a sentinel that reads back as nil, and this
+         arm knew only the string one: an int-typed global assigned nil got
+         default_value's 0, which is the zero a fresh slot starts at, not nil.
+         `if $g` then took the truthy branch on a global whose only assignment
+         was nil -- `Process.kill("KILL", -$pgid)` with $pgid nil signalled the
+         caller's own process group (#4248). nil_sentinel is the same rule the
+         ivar and local arms use. */
+      buf_puts(b, lv->type == TY_RANGE ? "(sp_Range){0}" : nil_sentinel(lv->type));
     else if (v_empty_arr && lv->type == TY_POLY_ARRAY) {
       if (v_lit_frozen) { int _ft = ++g_tmp;
         buf_printf(b, "({ sp_PolyArray *_t%d = sp_PolyArray_new(); _t%d->frozen = 1; _t%d; })", _ft, _ft, _ft); }
@@ -8041,10 +8043,26 @@ else {
     LocalVar *lv = rn ? comp_gvar(c, rn) : NULL;
     if (!lv) return;
     int v = nt_ref(nt, id, "value");
-    emit_indent(b, indent);
-    buf_printf(b, "if (%sgv_%s) { gv_%s = ", is_or ? "!" : "", rn, rn);
-    emit_expr(c, v, b);
-    buf_puts(b, "; }\n");
+    /* The slot's own truthiness, not C's: an int-typed global holds nil as
+       SP_INT_NIL, which is a non-zero bit pattern, so a plain `if (!gv_x)`
+       read a never-assigned global as truthy and `$x ||= v` stopped firing
+       once the slot started at the sentinel (#4248). This is also closer to
+       Ruby than the zero test it replaces -- `$x = 0; $x ||= 5` leaves 0,
+       where the C test fired. */
+    { char gref[256];
+      snprintf(gref, sizeof gref, "gv_%s", rn);
+      emit_indent(b, indent);
+      buf_puts(b, "if (");
+      if (!is_or) { /* &&= runs when the slot is truthy */ }
+      else buf_puts(b, "!(");
+      if (lv->type == TY_INT)          buf_printf(b, "%s != SP_INT_NIL", gref);
+      else if (lv->type == TY_FLOAT)   buf_printf(b, "!sp_float_is_nil(%s)", gref);
+      else if (lv->type == TY_POLY)    buf_printf(b, "sp_poly_truthy(%s)", gref);
+      else                             buf_puts(b, gref);
+      if (is_or) buf_puts(b, ")");
+      buf_printf(b, ") { gv_%s = ", rn);
+      emit_expr(c, v, b);
+      buf_puts(b, "; }\n"); }
     return;
   }
   if (sp_streq(ty, "MatchRequiredNode")) {
