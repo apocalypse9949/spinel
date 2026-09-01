@@ -5246,6 +5246,23 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         buf_puts(b, "; break;");
         obj_default_done = 1;
       }
+      /* Blockless any? / none?: "is there an element", which every builtin
+         container answers. The switch carries an arm per user class owning the
+         name and none for a builtin, so a slot that may hold an Array OR such
+         an object raised NoMethodError on the Array -- naming Array, whose
+         method it is (#4264). In the DEFAULT, like the conversions around it:
+         a class that defines the name has its own case and never arrives. */
+      if (!obj_default_done && argc == 0 && nt_ref(nt, id, "block") < 0 &&
+          (sp_streq(name, "any?") || sp_streq(name, "none?"))) {
+        int neg = sp_streq(name, "none?");
+        char av[96];
+        snprintf(av, sizeof av, "(sp_poly_length(_t%d) %s 0)", tv, neg ? "==" : ">");
+        buf_printf(b, " default: _t%d = ", tr);
+        if (ret == TY_POLY) emit_boxed_text(c, TY_BOOL, av, b);
+        else buf_puts(b, av);
+        buf_puts(b, "; break;");
+        obj_default_done = 1;
+      }
       /* to_h, the same shape: the switch carries an arm per class that defines
          it and none for a builtin, so a plain Hash reached the default and
          raised -- naming Hash, whose method it is. In the DEFAULT, not as a
