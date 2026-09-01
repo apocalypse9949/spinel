@@ -2008,6 +2008,15 @@ void emit_expr(Compiler *c, int id, Buf *b) {
     const char *par_nmc = (par_tyc && (sp_streq(par_tyc, "ConstantReadNode") ||
                                        sp_streq(par_tyc, "ConstantPathNode")))
                           ? nt_str(nt, par_idc, "name") : NULL;
+    /* A constant naming a CLASS is a written path (Probe::Block::CODE). A
+       constant HOLDING one (BLOCK = Probe::Block; BLOCK::CODE) is a receiver
+       whose class only the value knows, so it takes the run-time read below --
+       treating it as a path looked the leaf up and answered a top-level
+       constant of that name (#4259). */
+    if (par_nmc && par_tyc && sp_streq(par_tyc, "ConstantReadNode") &&
+        comp_class_index(c, par_nmc) < 0 && !is_builtin_class_name(par_nmc) &&
+        comp_const(c, par_nmc))
+      par_nmc = NULL;
     /* An ffi_const is parent-qualified; resolve it BEFORE the leaf-keyed
        plain-constant table, or a same-leaf plain constant in another module
        silently claims the reference (and its type). */

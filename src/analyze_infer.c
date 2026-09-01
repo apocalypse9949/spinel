@@ -6112,6 +6112,13 @@ TyKind infer_uncached(Compiler *c, int id) {
       const char *dpty = dpar >= 0 ? nt_type(nt, dpar) : NULL;
       int dyn = dpar >= 0 && !(dpty && (sp_streq(dpty, "ConstantReadNode") ||
                                         sp_streq(dpty, "ConstantPathNode")));
+      /* ...and a constant that HOLDS a class rather than naming one is a
+         dynamic receiver too (#4259) */
+      if (!dyn && dpar >= 0 && dpty && sp_streq(dpty, "ConstantReadNode")) {
+        const char *pn = nt_str(nt, dpar, "name");
+        if (pn && comp_class_index(c, pn) < 0 && !is_builtin_class_name(pn) &&
+            comp_const(c, pn)) dyn = 1;
+      }
       TyKind prt = dyn ? infer_type(c, dpar) : TY_UNKNOWN;
       if (nm && dyn && (prt == TY_CLASS || prt == TY_POLY)) {
         TyKind ct = TY_UNKNOWN; int nc = 0, uniform = 1;
