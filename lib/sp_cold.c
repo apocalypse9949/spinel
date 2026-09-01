@@ -21,6 +21,7 @@
 #include "sp_alloc.h"   /* sp_str_alloc / sp_str_set_len / sp_raise_cls */
 #include "sp_array.h"   /* sp_StrArray for Dir.glob */
 #include <dirent.h>
+#include <fnmatch.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/resource.h>   /* getpriority for Process.getpriority */
@@ -343,33 +344,132 @@ else {
   return *str == 0;
 }
 
-void sp_dir_glob_rec(const char *fsdir, const char *outprefix,
-                            const char *tail, sp_StrArray *a) {
-  DIR *d = opendir(fsdir);
+/* One pattern COMPONENT against one directory entry name. The system matcher,
+   which is what File.fnmatch already answers with, so a character class or an
+   escape means the same thing in both -- the hand-rolled matcher this replaces
+   knew only * and ?, which is why `a/[bx]/mid.rs` found nothing while
+   File.fnmatch called it a match (#4252). No FNM_PATHNAME: the component holds
+   no separator by construction. FNM_PERIOD hides a leading dot unless the
+   pattern asks for one, which is CRuby's rule and the flag's own. */
+static int sp_glob_comp_match(const char *comp, const char *name) {
+  if (name[0] == '.' && !sp_glob_dotmatch && comp[0] != '.') return 0;
+  return fnmatch(comp, name, sp_glob_dotmatch ? 0 : FNM_PERIOD) == 0;
+}
+
+static int sp_glob_has_meta(const char *comp) {
+  for (const char *p = comp; *p; p++)
+    if (*p == '*' || *p == '?' || *p == '[') return 1;
+  return 0;
+}
+
+static void sp_glob_push(sp_StrArray *a, const char *path) {
+  char *copy = sp_str_alloc(strlen(path));
+  strcpy(copy, path);
+  sp_StrArray_push(a, copy);
+}
+
+static int sp_glob_is_dir(const char *path) {
+  struct stat st;
+  return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static int sp_glob_exists(const char *path) {
+  struct stat st;
+  return lstat(path, &st) == 0;
+}
+
+/* Walk the components from index `ci`. `fsdir` is the directory to read (""
+   means the process's own), `outprefix` is what the answers are spelled with.
+   Every component is handled the same way -- literal, metacharacter, or ** --
+   which is what lets a wildcard sit anywhere rather than only last: the old
+   walk split the pattern at its LAST slash and opendir'd the part before it, so
+   a wildcard middle component opened a directory literally named with it,
+   and found nothing. */
+static void sp_glob_walk(const char *fsdir, const char *outprefix,
+                         char **comps, int ncomp, int ci, sp_StrArray *a) {
+  if (ci >= ncomp) return;
+  const char *comp = comps[ci];
+  int last = (ci == ncomp - 1);
+  char fspath[2048], outpath[2048];
+
+  /* A TRAILING double star is not recursive in CRuby: Dir.glob("a" + SEP +
+     "**") answers what a single star answers, and only the form with a
+     separator AFTER the stars descends. The recursion lives in that
+     separator, not in the stars. */
+  if (strcmp(comp, "**") == 0 && last) comp = "*";
+
+  if (strcmp(comp, "**") == 0) {
+    /* ** matches zero or more directories. Zero first: the rest of the pattern
+       applies right here. */
+    if (!last) sp_glob_walk(fsdir, outprefix, comps, ncomp, ci + 1, a);
+    DIR *d = opendir(fsdir[0] ? fsdir : ".");
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+      const char *name = e->d_name;
+      if (name[0] == '.' && (name[1] == 0 || (name[1] == '.' && name[2] == 0))) continue;
+      if (name[0] == '.' && !sp_glob_dotmatch) continue;
+      snprintf(fspath, sizeof fspath, "%s%s%s", fsdir, fsdir[0] ? "/" : "", name);
+      snprintf(outpath, sizeof outpath, "%s%s", outprefix, name);
+      /* A trailing ** answers every entry beneath it, directories included --
+         `Dir.glob("a/**")` is ["a/b", "a/top.rs"] in CRuby. */
+      if (last) sp_glob_push(a, outpath);
+      if (sp_glob_is_dir(fspath)) {
+        char sub[2048];
+        snprintf(sub, sizeof sub, "%s%s/", outprefix, name);
+        /* stay on the same component: ** consumes any number of levels */
+        sp_glob_walk(fspath, sub, comps, ncomp, ci, a);
+      }
+    }
+    closedir(d);
+    return;
+  }
+
+  if (!sp_glob_has_meta(comp)) {
+    /* A literal component needs no readdir: ask the filesystem directly. */
+    snprintf(fspath, sizeof fspath, "%s%s%s", fsdir, fsdir[0] ? "/" : "", comp);
+    snprintf(outpath, sizeof outpath, "%s%s", outprefix, comp);
+    if (last) { if (sp_glob_exists(fspath)) sp_glob_push(a, outpath); return; }
+    if (sp_glob_is_dir(fspath)) {
+      char sub[2048];
+      snprintf(sub, sizeof sub, "%s/", outpath);
+      sp_glob_walk(fspath, sub, comps, ncomp, ci + 1, a);
+    }
+    return;
+  }
+
+  DIR *d = opendir(fsdir[0] ? fsdir : ".");
   if (!d) return;
   struct dirent *e;
   while ((e = readdir(d)) != NULL) {
     const char *name = e->d_name;
+    /* "." is an answer under FNM_DOTMATCH -- CRuby lists it for `*` there --
+       while ".." never is. Both stay hidden without the flag. */
     if (name[0] == '.' && name[1] == '.' && name[2] == 0) continue;
-    if (!sp_glob_dotmatch && name[0] == '.' && name[1] == 0) continue;
-    char fspath[2048], outpath[2048];
-    snprintf(fspath, sizeof fspath, "%s/%s", fsdir, name);
+    if (name[0] == '.' && name[1] == 0 && !sp_glob_dotmatch) continue;
+    if (!sp_glob_comp_match(comp, name)) continue;
+    snprintf(fspath, sizeof fspath, "%s%s%s", fsdir, fsdir[0] ? "/" : "", name);
     snprintf(outpath, sizeof outpath, "%s%s", outprefix, name);
-    if ((sp_glob_dotmatch || !(name[0] == '.' && tail[0] != '.')) && sp_fnmatch1(tail, name)) {
-      char *copy = sp_str_alloc(strlen(outpath));
-      strcpy(copy, outpath);
-      sp_StrArray_push(a, copy);
-    }
-    if (name[0] != '.') {
-      struct stat st;
-      if (lstat(fspath, &st) == 0 && S_ISDIR(st.st_mode)) {
-        char subprefix[2048];
-        snprintf(subprefix, sizeof subprefix, "%s%s/", outprefix, name);
-        sp_dir_glob_rec(fspath, subprefix, tail, a);
-      }
+    if (last) { sp_glob_push(a, outpath); continue; }
+    if (sp_glob_is_dir(fspath)) {
+      char sub[2048];
+      snprintf(sub, sizeof sub, "%s/", outpath);
+      sp_glob_walk(fspath, sub, comps, ncomp, ci + 1, a);
     }
   }
   closedir(d);
+}
+
+/* The old entry point, kept for its callers: everything under `fsdir` whose
+   basename matches `tail`. */
+void sp_dir_glob_rec(const char *fsdir, const char *outprefix,
+                     const char *tail, sp_StrArray *a) {
+  char *comps[2];
+  char sstar[3] = "**";
+  char tbuf[1024];
+  snprintf(tbuf, sizeof tbuf, "%s", tail && tail[0] ? tail : "*");
+  comps[0] = sstar; comps[1] = tbuf;
+  sp_glob_walk(fsdir && fsdir[0] && strcmp(fsdir, ".") ? fsdir : "", outprefix, comps, 2, 0, a);
 }
 
 sp_StrArray *sp_dir_glob(const char *pattern);
@@ -380,6 +480,65 @@ sp_StrArray *sp_dir_glob_dot(const char *pattern) {SP_GC_ROOT_STR(pattern);
   sp_glob_dotmatch = 0;
   return a;
 }
+
+/* One pattern, already brace-free, into `a`. */
+static void sp_dir_glob_one(const char *pattern, sp_StrArray *a) {
+  char buf[2048];
+  snprintf(buf, sizeof buf, "%s", pattern);
+  char *comps[64];
+  int ncomp = 0;
+  int absolute = (buf[0] == '/');
+  char *p = buf + (absolute ? 1 : 0);
+  for (char *tok = p; ncomp < 64; ) {
+    char *sl = strchr(tok, '/');
+    if (sl) *sl = 0;
+    if (*tok) comps[ncomp++] = tok;      /* a doubled slash contributes nothing */
+    if (!sl) break;
+    tok = sl + 1;
+  }
+  if (ncomp == 0) return;
+  sp_glob_walk(absolute ? "/" : "", absolute ? "/" : "", comps, ncomp, 0, a);
+}
+
+/* CRuby expands `{a,b}` before matching, and the system matcher does not do it
+   at all, so it is expanded here: one alternative at a time, recursively, so
+   nested and multiple braces both work. */
+static void sp_dir_glob_braces(const char *pattern, sp_StrArray *a, int depth) {
+  const char *open = NULL;
+  int nest = 0;
+  for (const char *q = pattern; *q; q++) {
+    if (*q == '\\' && q[1]) { q++; continue; }
+    if (*q == '{') { open = q; break; }
+  }
+  if (!open || depth > 8) { sp_dir_glob_one(pattern, a); return; }
+  const char *close = NULL;
+  for (const char *q = open; *q; q++) {
+    if (*q == '\\' && q[1]) { q++; continue; }
+    if (*q == '{') nest++;
+    else if (*q == '}') { nest--; if (nest == 0) { close = q; break; } }
+  }
+  if (!close) { sp_dir_glob_one(pattern, a); return; }
+  size_t prelen = (size_t)(open - pattern);
+  const char *alt = open + 1;
+  nest = 0;
+  for (const char *q = open + 1; q <= close; q++) {
+    if (*q == '\\' && q[1]) { q++; continue; }
+    if (*q == '{') nest++;
+    else if (*q == '}' && nest > 0) nest--;
+    if ((*q == ',' && nest == 0) || q == close) {
+      char expanded[2048];
+      size_t altlen = (size_t)(q - alt);
+      if (prelen + altlen + strlen(close + 1) + 1 < sizeof expanded) {
+        memcpy(expanded, pattern, prelen);
+        memcpy(expanded + prelen, alt, altlen);
+        strcpy(expanded + prelen + altlen, close + 1);
+        sp_dir_glob_braces(expanded, a, depth + 1);
+      }
+      alt = q + 1;
+    }
+  }
+}
+
 sp_StrArray *sp_dir_glob(const char *pattern) {
   /* the pattern is often a fresh interpolation temp, unrooted at the call
      site; the per-match sp_str_allocs below can collect it mid-walk */
@@ -390,66 +549,7 @@ sp_StrArray *sp_dir_glob(const char *pattern) {
      sp_dir_entries_impl or it (and its pushed names) get swept under us */
   SP_GC_ROOT(a);
   if (!pattern) return a;
-  /* Recursive double-star form: split at the double-star component. Everything
-     before it is the output prefix (and, minus the trailing slash, the directory
-     to walk); the component after it is the per-directory tail pattern. */
-  const char *ss = strstr(pattern, "**");
-  if (ss) {
-    size_t plen = (size_t)(ss - pattern);
-    if (plen >= 1024) return a;
-    const char *after = ss + 2;
-    if (*after == '/') after++;
-    const char *tail = after;
-    char outprefix[1024];
-    memcpy(outprefix, pattern, plen);
-    outprefix[plen] = 0;
-    char fsdir[1024];
-    if (plen == 0) {
-      strcpy(fsdir, ".");
-    }
-    else {
-      memcpy(fsdir, pattern, plen);
-      fsdir[plen] = 0;
-      if (fsdir[plen - 1] == '/') fsdir[plen - 1] = 0;
-      if (fsdir[0] == 0) strcpy(fsdir, "/");
-    }
-    sp_dir_glob_rec(fsdir, outprefix, tail, a);
-    sp_StrArray_sort_bang(a);
-    return a;
-  }
-  const char *slash = strrchr(pattern, '/');
-  char dirbuf[1024];
-  const char *dirpath;
-  const char *base_pat;
-  if (slash) {
-    size_t dl = (size_t)(slash - pattern);
-    if (dl >= sizeof(dirbuf)) return a;
-    memcpy(dirbuf, pattern, dl);
-    dirbuf[dl] = 0;
-    dirpath = (dl == 0) ? "/" : dirbuf;
-    base_pat = slash + 1;
-  }
-else {
-    dirpath = ".";
-    base_pat = pattern;
-  }
-  DIR *d = opendir(dirpath);
-  if (!d) return a;
-  struct dirent *e;
-  while ((e = readdir(d)) != NULL) {
-    const char *name = e->d_name;
-    if (name[0] == '.' && name[1] == '.' && name[2] == 0) continue;
-    if (!sp_glob_dotmatch && name[0] == '.' && base_pat[0] != '.') continue;
-    if (sp_fnmatch1(base_pat, name)) {
-      char full[2048];
-      if (slash) snprintf(full, sizeof(full), "%s/%s", dirbuf, name);
-      else snprintf(full, sizeof(full), "%s", name);
-      char *copy = sp_str_alloc(strlen(full));
-      strcpy(copy, full);
-      sp_StrArray_push(a, copy);
-    }
-  }
-  closedir(d);
+  sp_dir_glob_braces(pattern, a, 0);
   sp_StrArray_sort_bang(a);
   return a;
 }
@@ -1298,7 +1398,6 @@ sp_StrArray *sp_bt_format(void **buf, int n) {
 
 #include <fcntl.h>
 #include <sys/file.h>
-#include <fnmatch.h>
 #include <pwd.h>
 #include <sys/wait.h>
 
