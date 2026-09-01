@@ -11,13 +11,19 @@
 r, w = IO.pipe
 n = 300
 seen = Queue.new
+arrived = Queue.new
 threads = Array.new(n) do |i|
   Thread.new do
+    arrived << 1
     ready = i.even? ? r.wait_readable(3) : IO.select([r], nil, nil, 3)
     seen << (ready.nil? ? 0 : 1)
   end
 end
-sleep 0.2
+# Write only once every waiter has announced itself, so no thread can
+# start late and find the pipe already readable. A waiter announces just
+# before it parks, so give the last of them the tick it needs to get there.
+n.times { arrived.pop }
+sleep 0.05
 t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 w.write "x"
 w.flush   # CRuby makes a pipe's write end sync; spinel does not (yet), and this test is about the scheduler
