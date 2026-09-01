@@ -1434,6 +1434,11 @@ static inline sp_int sp_int_shr(sp_int a, sp_int n) {
    a float truncates (harmless -- a bignum is always outside float-fraction
    range) and a non-numeric collapses to 0 (a type mismatch Ruby would raise
    on; Spinel yields a defined result instead of crashing). */
+/* fwd: the boxed division family below needs these, and their declarations
+   come later in this header. */
+sp_Bigint *sp_bigint_div(sp_Bigint *a, sp_Bigint *b);
+sp_Bigint *sp_bigint_mod(sp_Bigint *a, sp_Bigint *b);
+sp_Bigint *sp_bigint_remainder(sp_Bigint *a, sp_Bigint *b);
 static sp_Bigint *sp_poly_as_bigint(sp_RbVal v) {
   if (v.tag == SP_TAG_BIGINT) return (sp_Bigint *)v.v.p;
   if (v.tag == SP_TAG_INT) return sp_bigint_new_int(v.v.i);
@@ -2977,9 +2982,9 @@ static void sp_sort_idx_by_poly(sp_int *idx, const sp_RbVal *keys, sp_int n) {
   if (src != idx) for (sp_int x = 0; x < n; x++) idx[x] = src[x];   /* odd #levels: result is in tmp */
   free(tmp);
 }
-static sp_RbVal sp_poly_div(sp_RbVal a, sp_RbVal b) { if ((sp_poly_is_brat(a) || sp_poly_is_brat(b))) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) / sp_poly_to_f(b)); return sp_brat_div_poly(a, b); } if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && a.tag != SP_TAG_FLT && b.tag != SP_TAG_FLT) return sp_box_rational(sp_rational_div(sp_poly_as_rational(a), sp_poly_as_rational(b))); if ((a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) || (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_complex(sp_complex_div(sp_poly_as_complex(a), sp_poly_as_complex(b))); if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f_with_rational(a) / sp_poly_to_f_with_rational(b)); if (sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b)) return sp_poly_binop_bad("/", a, b); return sp_box_int(sp_idiv(sp_poly_to_i(a), sp_poly_to_i(b))); }
+static sp_RbVal sp_poly_div(sp_RbVal a, sp_RbVal b) { if ((sp_poly_is_brat(a) || sp_poly_is_brat(b))) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) / sp_poly_to_f(b)); return sp_brat_div_poly(a, b); } if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && a.tag != SP_TAG_FLT && b.tag != SP_TAG_FLT) return sp_box_rational(sp_rational_div(sp_poly_as_rational(a), sp_poly_as_rational(b))); if ((a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) || (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_complex(sp_complex_div(sp_poly_as_complex(a), sp_poly_as_complex(b))); if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f_with_rational(a) / sp_poly_to_f_with_rational(b)); if (sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b)) return sp_poly_binop_bad("/", a, b); if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_div(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); return sp_box_int(sp_idiv(sp_poly_to_i(a), sp_poly_to_i(b))); }
 static sp_RbVal sp_poly_str_mod(sp_RbVal a, sp_RbVal b);  /* fwd: defined beside the format helper */
-static sp_RbVal sp_poly_mod(sp_RbVal a, sp_RbVal b) { if (a.tag == SP_TAG_STR || sp_poly_is_strbuf(a)) return sp_poly_str_mod(sp_poly_strbuf_deref(a), b); if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_fmod(sp_poly_to_f(a), sp_poly_to_f(b))); if (sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b)) return sp_poly_binop_bad("%", a, b); if (sp_poly_is_rational(a) || sp_poly_is_rational(b)) return sp_box_rational(sp_rational_mod(sp_poly_as_rational(a), sp_poly_as_rational(b))); return sp_box_int(sp_imod(sp_poly_to_i(a), sp_poly_to_i(b))); }  /* sp_fmod: CRuby divisor-sign result + zero-divisor raise */
+static sp_RbVal sp_poly_mod(sp_RbVal a, sp_RbVal b) { if (a.tag == SP_TAG_STR || sp_poly_is_strbuf(a)) return sp_poly_str_mod(sp_poly_strbuf_deref(a), b); if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_fmod(sp_poly_to_f(a), sp_poly_to_f(b))); if (sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b)) return sp_poly_binop_bad("%", a, b); if (sp_poly_is_rational(a) || sp_poly_is_rational(b)) return sp_box_rational(sp_rational_mod(sp_poly_as_rational(a), sp_poly_as_rational(b))); if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_mod(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); return sp_box_int(sp_imod(sp_poly_to_i(a), sp_poly_to_i(b))); }  /* sp_fmod: CRuby divisor-sign result + zero-divisor raise */
 /* divmod / quo on a boxed receiver. The typed paths build these inline per
    receiver kind; the poly path had neither, so an exact Rational reaching them
    through a block parameter raised NoMethodError on a method it answers (#3512).
@@ -3013,6 +3018,14 @@ static sp_RbVal sp_poly_divmod(sp_RbVal a, sp_RbVal b) {
     sp_PolyArray_push(out, sp_box_float(sp_fmod(fa, fb)));
     return sp_box_poly_array(out);
   }
+  /* a Bignum pair: sp_poly_to_i below truncates it to 64 bits and answered a
+     quotient seven orders of magnitude out, with a remainder of 0. */
+  if (a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT) {
+    sp_Bigint *ba = sp_poly_as_bigint(a), *bb = sp_poly_as_bigint(b);
+    sp_PolyArray_push(out, sp_box_bigint(sp_bigint_div(ba, bb)));
+    sp_PolyArray_push(out, sp_box_bigint(sp_bigint_mod(ba, bb)));
+    return sp_box_poly_array(out);
+  }
   {
     sp_int ia = sp_poly_to_i(a), ib = sp_poly_to_i(b);
     sp_PolyArray_push(out, sp_box_int(sp_idiv(ia, ib)));
@@ -3033,6 +3046,10 @@ static sp_RbVal sp_poly_div_m(sp_RbVal a, sp_RbVal b) {
     sp_float q = floor(sp_poly_to_f_with_rational(a) / fb);
     return (q >= -9.2e18 && q <= 9.2e18) ? sp_box_int((sp_int)q) : sp_box_float(q);
   }
+  /* a Bignum operand: sp_poly_to_i truncates it to 64 bits, so this answered a
+     number seven orders of magnitude out. sp_bigint_div floors toward -inf,
+     which is what Integer#div does. */
+  if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_div(sp_poly_as_bigint(a), sp_poly_as_bigint(b)));
   return sp_box_int(sp_idiv(sp_poly_to_i(a), sp_poly_to_i(b)));
 }
 /* Numeric#remainder: the remainder with the sign of the RECEIVER, which is
@@ -3046,6 +3063,7 @@ static sp_RbVal sp_poly_remainder(sp_RbVal a, sp_RbVal b) {
     if (fb == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
     return sp_box_float(fa - fb * trunc(fa / fb));
   }
+  if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_remainder(sp_poly_as_bigint(a), sp_poly_as_bigint(b)));
   { sp_int ia = sp_poly_to_i(a), ib = sp_poly_to_i(b);
     if (ib == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
     return sp_box_int(ia - ib * (ia / ib)); }
