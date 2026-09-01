@@ -23,7 +23,11 @@
 #include "sp_alloc.h"   /* sp_PolyArray, sp_box_sym, sp_box_poly_array, sp_raise_cls */
 
 typedef struct sp_Proc { void *fn; void *cap; void (*cap_scan)(void *); sp_int arity; sp_bool lambda_p; sp_int param_count; const sp_sym *param_kinds; const sp_sym *param_names; sp_bool frozen; /* Object#freeze observed (sp_gc_alloc zero-fills) */ void *origin; /* dup/clone lineage root for Proc#== (NULL: self is the root) */ } sp_Proc;
-typedef struct { sp_Proc *target; sp_int nargs; sp_RbVal args[16]; } sp_Curry;
+/* arity: the count this accumulator realizes at -- Proc#curry(n)'s n, else
+   the target's required-parameter count (CRuby's min arity, so a variadic
+   base realizes on its first call). Carried here so a curry that travels
+   through a container or an untyped slot still knows when it is done. */
+typedef struct { sp_Proc *target; sp_int arity; sp_int nargs; sp_RbVal args[16]; } sp_Curry;
 
 sp_int sp_proc_call(sp_Proc *p, sp_int argc, sp_int *args);   /* defined in the generated TU */
 extern SP_TLS sp_RbVal _sp_proc_poly_args[16];                   /* defined in the generated TU */
@@ -45,6 +49,7 @@ sp_PolyArray *sp_proc_parameters_ids(sp_Proc *p, int mode, sp_sym req_id, sp_sym
 sp_PolyArray *sp_proc_parameters(sp_Proc *p);
 void sp_curry_scan(void *p);
 sp_Curry *sp_curry_new(sp_Proc *p);
+sp_Curry *sp_curry_new_n(sp_Proc *p, sp_int n, sp_int max);
 sp_Curry *sp_curry_apply(sp_Curry *c, sp_RbVal arg);
 void sp_curry_publish_args(sp_Curry *c);
 

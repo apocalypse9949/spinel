@@ -260,6 +260,7 @@ int desugar_instance_eval_builtin(Compiler *c);
 int desugar_builtin_class_var_recv(Compiler *c);
 int desugar_compose_method_operand(Compiler *c);
 int desugar_method_curry(Compiler *c);
+int desugar_curry_arity_to_int(Compiler *c);
 int desugar_int_enum_with_index(Compiler *c);
 int widen_shared_cmp_params(Compiler *c);
 int desugar_reduce_proc_arg(Compiler *c);

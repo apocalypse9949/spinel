@@ -171,6 +171,52 @@ int desugar_compose_method_operand(Compiler *c) {
   return changed;
 }
 
+/* proc.curry(obj) -> proc.curry(obj.to_int): CRuby converts a non-Integer
+   count through to_int (a to_int-less count is its TypeError). The rewrite
+   fires once per argument -- an arg already spelled to_int, an Integer, or
+   a literal nil (curry's no-count spelling) is left alone. */
+int desugar_curry_arity_to_int(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int changed = 0;
+  int n0 = nt->count;
+  for (int id = 0; id < n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || !sp_streq(nm, "curry")) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (recv < 0 || infer_type(c, recv) != TY_PROC) continue;
+    int args = nt_ref(nt, id, "arguments");
+    int an = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    if (an != 1 || !av) continue;
+    int a0 = av[0];
+    /* Integer, nil-typed and BOXED counts are read at run time
+       (sp_curry_new_v), so only a count of some other settled type -- a
+       to_int object, a Float -- converts here. TY_UNKNOWN waits: the rewrite
+       is irreversible, and firing before the count's type settles wrapped a
+       later-nil method in to_int. */
+    TyKind a0t = infer_type(c, a0);
+    if (nt_kind(nt, a0) == NK_NilNode || a0t == TY_INT || a0t == TY_NIL ||
+        a0t == TY_POLY || a0t == TY_UNKNOWN) continue;
+    const char *anm = nt_kind(nt, a0) == NK_CallNode ? nt_str(nt, a0, "name") : NULL;
+    if (anm && sp_streq(anm, "to_int")) continue;
+    int base = nt->count;
+    int ti = nt_new_node(nt, "CallNode");
+    int na = nt_new_node(nt, "ArgumentsNode");
+    if (ti < 0 || na < 0) continue;
+    nt_node_set_ref(nt, ti, "receiver", a0);
+    nt_node_set_str(nt, ti, "name", "to_int");
+    nt_node_set_ref(nt, ti, "arguments", -1);
+    nt_node_set_ref(nt, ti, "block", -1);
+    nt_node_set_arr(nt, na, "arguments", &ti, 1);
+    nt_node_set_ref(nt, id, "arguments", na);
+    comp_grow_node_arrays(c);
+    int encl = c->nscope[id];
+    for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
+    changed = 1;
+  }
+  return changed;
+}
+
 /* method.curry -> method.to_proc.curry: the Proc curry machinery (arity
    typing, boxed accumulation, param widening) then applies unchanged. The
    rewrite fires once: afterwards curry's receiver is the synthesized

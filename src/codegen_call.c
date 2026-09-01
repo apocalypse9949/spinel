@@ -3120,21 +3120,32 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
         return 1;
       }
     }
-    /* Proc#curry and curry application. */
+    /* Proc#curry and curry application. curry(nil) -- literal or a nil-typed
+       variable -- is CRuby's spelling of no count; a real count rides into
+       the accumulator (sp_curry_new_n), whose constructor raises CRuby's
+       ArgumentError when the count leaves the lambda's min..max -- literal
+       and computed counts take the same path, and the AST supplies the max
+       the runtime meta cannot see. */
     if (crt == TY_PROC && sp_streq(name, "curry") &&
-        (argc == 0 || (argc == 1 && comp_ntype(c, argv[0]) == TY_INT))) {
-      /* curry(n) fixes the arity the chain completes at (#3680). A LAMBDA has
-         a fixed arity, so a count that disagrees with it is an ArgumentError
-         -- CRuby raises at the curry call, before anything is applied. */
-      if (argc == 1 && nt_kind(nt, argv[0]) == NK_IntegerNode) {
-        int nreq = 0, variadic = 0, is_lambda = 0;
-        if (curry_base_info(c, recv, &nreq, &variadic, &is_lambda) && is_lambda && !variadic &&
-            (int)nt_int(nt, argv[0], "value", nreq) != nreq) {
-          buf_puts(b, "({ (void)("); emit_expr(c, recv, b);
-          buf_puts(b, "); sp_raise_cls(\"ArgumentError\", \"wrong number of arguments\");"
-                      " (sp_Curry *)NULL; })");
-          return 1;
-        }
+        (argc == 0 ||
+         (argc == 1 && (comp_ntype(c, argv[0]) == TY_INT ||
+                        comp_ntype(c, argv[0]) == TY_NIL ||
+                        comp_ntype(c, argv[0]) == TY_POLY ||
+                        nt_kind(nt, argv[0]) == NK_NilNode)))) {
+      if (argc == 1 && nt_kind(nt, argv[0]) != NK_NilNode) {
+        /* the receiver is usually built right here; root it while the count
+           expression runs, which may allocate (the compose-operand hazard).
+           An int-typed count validates directly; a nil-typed or boxed one is
+           decided at run time, exactly as CRuby's proc_curry reads it. */
+        TyKind cty = comp_ntype(c, argv[0]);
+        int tcn = ++g_tmp;
+        buf_printf(b, "({ sp_Proc *_t%d = ", tcn); emit_expr(c, recv, b);
+        buf_printf(b, "; SP_GC_ROOT(_t%d); sp_curry_new_%s(_t%d, ", tcn,
+                   cty == TY_INT ? "n" : "v", tcn);
+        if (cty == TY_INT) emit_int_expr(c, argv[0], b);
+        else emit_boxed(c, argv[0], b);
+        buf_printf(b, ", %d); })", curry_count_max(c, recv));
+        return 1;
       }
       buf_puts(b, "sp_curry_new("); emit_expr(c, recv, b); buf_puts(b, ")");
       return 1;
@@ -3151,6 +3162,23 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
       buf_printf(b, "({ sp_Curry *_t%d = ", tcl); emit_expr(c, recv, b);
       buf_printf(b, "; (sp_bool)(_t%d && _t%d->target ? _t%d->target->lambda_p : 0); })",
                  tcl, tcl, tcl);
+      return 1;
+    }
+    if (crt == TY_CURRY && argc == 0 && sp_streq(name, "to_proc")) {
+      /* the wrapping proc applies its call's arguments and realizes (#3864) */
+      buf_puts(b, "sp_curry_to_proc("); emit_expr(c, recv, b); buf_puts(b, ")");
+      return 1;
+    }
+    if (crt == TY_CURRY && argc == 0 && sp_streq(name, "parameters")) {
+      /* a curried proc's parameters are CRuby's [[:rest]], whatever the base.
+         The sym table is sealed by now, so :rest interns at run time. */
+      int tro = ++g_tmp, tri = ++g_tmp;
+      buf_puts(b, "({ (void)("); emit_expr(c, recv, b);
+      buf_printf(b, "); sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
+                    " sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
+                    " sp_PolyArray_push(_t%d, sp_box_sym(sp_sym_intern_n(\"rest\", 4)));"
+                    " sp_PolyArray_push(_t%d, sp_box_poly_array(_t%d)); _t%d; })",
+                 tro, tro, tri, tri, tri, tro, tri, tro);
       return 1;
     }
     /* A zero-argument application is legal: it applies nothing, and on a
