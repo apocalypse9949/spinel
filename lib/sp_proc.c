@@ -61,6 +61,41 @@ sp_Curry *sp_curry_new(sp_Proc *p) {
   SP_GC_ROOT(p);  /* the target proc has no other root across this alloc */
   sp_Curry *c = (sp_Curry *)sp_gc_alloc(sizeof(sp_Curry), NULL, sp_curry_scan);
   c->target = p; c->nargs = 0;
+  /* no count given: realize at the target's required-parameter count (CRuby's
+     min arity; a negative arity encodes it as -req-1) */
+  c->arity = p ? (p->arity < 0 ? -p->arity - 1 : p->arity) : 0;
+  return c;
+}
+/* Proc#curry(n): the count overrides the default. CRuby validates n against
+   a lambda's min..max arity at the curry call, before anything is applied.
+   The min comes off the target's arity; the max only the compiler can see
+   (an optional widens it, a rest lifts it), so the call site passes it in --
+   max < 0 means unlimited-or-unknown, and the message then says "min+". */
+sp_Curry *sp_curry_new_n(sp_Proc *p, sp_int n, sp_int max) {
+  /* an int-typed slot's nil sentinel is CRuby's nil count: no count at all */
+  if (n == SP_INT_NIL) return sp_curry_new(p);
+  if (p && p->lambda_p) {
+    sp_int min = p->arity < 0 ? -p->arity - 1 : p->arity;
+    sp_int mx = max >= 0 ? max : (p->arity >= 0 ? p->arity : -1);
+    /* the max is the compiler's guess from a visible parameter list; the min
+       is the target's own truth. A guess below it names a different write of
+       the same name -- trust the target, drop the guess. */
+    if (mx >= 0 && mx < min) mx = -1;
+    if (n < min || (mx >= 0 && n > mx)) {
+      const char *want = mx < 0 ? sp_sprintf("%lld+", (long long)min)
+                       : mx == min ? sp_sprintf("%lld", (long long)min)
+                       : sp_sprintf("%lld..%lld", (long long)min, (long long)mx);
+      /* both strings live on the collected heap; the second sp_sprintf and
+         the raise path itself allocate, so root them across those */
+      SP_GC_ROOT_STR(want);
+      const char *msg = sp_sprintf("wrong number of arguments (given %lld, expected %s)",
+                                   (long long)n, want);
+      SP_GC_ROOT_STR(msg);
+      sp_raise_cls("ArgumentError", msg);
+    }
+  }
+  sp_Curry *c = sp_curry_new(p);
+  c->arity = n < 0 ? 0 : n;
   return c;
 }
 /* Each accumulated argument is stored boxed so a non-int arg (a String, an

@@ -5619,9 +5619,13 @@ static void sp_PolyPolyHash_grow(sp_PolyPolyHash*h){ sp_gc_wb((void*)h);sp_RbVal
 static SP_NOINLINE sp_RbVal sp_PolyPolyHash_miss(sp_PolyPolyHash*h,sp_RbVal k){if(h->dproc)return h->dproc(h,k,h->dproc_self);return h->default_v;}
 static sp_RbVal sp_PolyPolyHash_get(sp_PolyPolyHash*h,sp_RbVal k){if(!h)return sp_box_nil();SP_GC_ROOT(h);SP_GC_ROOT_RBVAL(k);sp_int hs=sp_hash_slot(sp_rbval_hash_key(k));sp_int idx=(sp_int)(hs&h->mask);while(h->occ[idx]){if(h->hs[idx]==hs&&sp_rbval_eql_key(h->keys[idx],k))return h->vals[idx];idx=(idx+1)&h->mask;}return sp_PolyPolyHash_miss(h,k);}
 static sp_bool sp_PolyPolyHash_has_value(sp_PolyPolyHash*h,sp_RbVal v){if(!h)return FALSE;for(sp_int i=0;i<h->len;i++)if(sp_poly_eq(h->vals[h->order[i]],v))return TRUE;return FALSE;}
+/* defined with the curry machinery below; the key-typed reads and the cold
+   index path all apply a curried receiver through it */
+static sp_RbVal sp_curry_call_poly(sp_Curry *c, sp_int argc, const sp_RbVal *args);
 static sp_RbVal sp_poly_get_sym(sp_RbVal v, sp_sym key) {
   if (v.tag != SP_TAG_OBJ) return sp_box_nil();
   switch (v.cls_id) {
+    case SP_BUILTIN_CURRY: return sp_curry_call_poly((sp_Curry *)v.v.p, 1, (sp_RbVal[]){sp_box_sym(key)});
     case SP_BUILTIN_SYM_POLY_HASH: return sp_SymPolyHash_get((sp_SymPolyHash*)v.v.p, key);
     case SP_BUILTIN_POLY_POLY_HASH: return sp_PolyPolyHash_get((sp_PolyPolyHash*)v.v.p, sp_box_sym(key));
     /* an OpenStruct read as poly (e.g. returned from a method that can also
@@ -5949,6 +5953,7 @@ static sp_RbVal sp_poly_shift(sp_RbVal v) {
 static sp_RbVal sp_poly_get_str(sp_RbVal v, const char *key) {
   if (v.tag != SP_TAG_OBJ) return sp_box_nil();
   switch (v.cls_id) {
+    case SP_BUILTIN_CURRY: return sp_curry_call_poly((sp_Curry *)v.v.p, 1, (sp_RbVal[]){sp_box_str(key)});
     case SP_BUILTIN_STR_POLY_HASH: return sp_StrPolyHash_get((sp_StrPolyHash*)v.v.p, key);
     case SP_BUILTIN_STR_STR_HASH: { const char *s = sp_StrStrHash_get((sp_StrStrHash*)v.v.p, key); return s ? sp_box_str(s) : sp_box_nil(); }
     case SP_BUILTIN_STR_INT_HASH: { sp_int i = sp_StrIntHash_get_opt((sp_StrIntHash*)v.v.p, key); return i == SP_INT_NIL ? sp_box_nil() : sp_box_int(i); }
@@ -6265,6 +6270,10 @@ static SP_NOINLINE sp_RbVal sp_poly_arr_get_hash_cold(sp_RbVal a, sp_int i) {
     sp_IntStrHash *h = (sp_IntStrHash *)a.v.p;
     return sp_IntStrHash_has_key(h, i) ? sp_box_str(sp_IntStrHash_get(h, i)) : sp_box_nil();
   }
+  /* a curried Proc read out of a container: [] applies the argument,
+     realizing once the accumulator reaches its count */
+  if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_CURRY)
+    return sp_curry_call_poly((sp_Curry *)a.v.p, 1, (sp_RbVal[]){sp_box_int(i)});
   /* bm[arg]: a boxed bound Method called with the (single) int argument. */
   if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_METHOD) {
     sp_BoundMethod *m = (sp_BoundMethod *)a.v.p;
@@ -6315,6 +6324,10 @@ static sp_RbVal sp_poly_dig_list(sp_RbVal recv, sp_PolyArray *keys) {
 }
 /* poly[poly_key]: dispatch on key tag at runtime. */
 static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
+  /* a curried Proc applies its [] argument whatever the key kind -- claimed
+     here, before the key-typed dispatch below coerces it to an index */
+  if (recv.tag == SP_TAG_OBJ && recv.cls_id == SP_BUILTIN_CURRY)
+    return sp_curry_call_poly((sp_Curry *)recv.v.p, 1, &idx);
   /* an Integer index into an array is the common read, and it matches nothing
      below until the very last line (array kinds are builtin, so the Struct arm
      with its cls_id >= 0 test cannot claim it) */
@@ -7945,8 +7958,13 @@ SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg) {
 static void sp_raise(const char *msg) { sp_raise_cls("RuntimeError", msg); }
 
 /* Unwrap a boxed Proc -- one read out of a container (#3655). */
+static sp_Proc *sp_curry_to_proc(sp_Curry *cy);   /* with the curry machinery below */
 static sp_Proc *sp_poly_to_proc(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_PROC) return (sp_Proc *)v.v.p;
+  /* a curried Proc converts to the deferring wrapper, so &partial drives a
+     block wherever a proc would (#3864) */
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_CURRY)
+    return sp_curry_to_proc((sp_Curry *)v.v.p);
   sp_raise_cls("TypeError", "callable object is expected");
   return NULL;
 }
@@ -10308,13 +10326,22 @@ static sp_RbVal sp_curry_realize_poly(sp_Curry *c) {
    reaches the target's arity, and answer the new curry boxed otherwise. The
    static paths kept answering a Curry for a saturating call, so a method taking
    a curried Proc returned a Proc where CRuby returns the value (#4068). */
+/* Proc#curry with a count that arrives BOXED (an untyped slot, a container
+   read): nil is no count, everything else converts through the Integer
+   argument protocol -- CRuby's to_int, the user-object bridge and its exact
+   TypeErrors included. */
+static sp_Curry *sp_curry_new_v(sp_Proc *p, sp_RbVal n, sp_int max) {
+  if (n.tag == SP_TAG_NIL || (n.tag == SP_TAG_INT && n.v.i == SP_INT_NIL))
+    return sp_curry_new(p);
+  return sp_curry_new_n(p, sp_poly_arg_int_chk(n), max);
+}
 static sp_RbVal sp_curry_call_poly(sp_Curry *c, sp_int argc, const sp_RbVal *args) {
   if (!c) return sp_box_nil();
   SP_GC_ROOT(c);
   for (sp_int i = 0; i < argc; i++) c = sp_curry_apply(c, args[i]);
-  sp_int want = c->target ? c->target->arity : 0;
-  if (want < 0) want = -want - 1;   /* variadic: the required count */
-  if (c->nargs >= want) return sp_curry_realize_poly(c);
+  /* the accumulator carries its own completion count -- curry(n)'s n, else
+     the target's required count, stamped at creation */
+  if (c->nargs >= c->arity) return sp_curry_realize_poly(c);
   return sp_box_obj((void *)c, SP_BUILTIN_CURRY);
 }
 
@@ -10325,8 +10352,10 @@ static sp_RbVal sp_curry_call_poly(sp_Curry *c, sp_int argc, const sp_RbVal *arg
 static sp_int sp_curry_proc_fn(void *cap, sp_int argc, sp_int *args) {
   sp_Curry *cy = (sp_Curry *)cap;
   (void)args;
-  for (sp_int i = 0; i < argc && i < 16; i++) cy = sp_curry_apply(cy, _sp_proc_poly_args[i]);
-  _sp_proc_poly_ret = sp_curry_realize_poly(cy);
+  /* apply-and-decide, like every other application path: a call that does
+     not reach the accumulator's count answers the next curry, not the
+     target called short */
+  _sp_proc_poly_ret = sp_curry_call_poly(cy, argc < 16 ? argc : 16, _sp_proc_poly_args);
   return sp_poly_to_i(_sp_proc_poly_ret);
 }
 /* sp_Proc_scan calls cap_scan WITHOUT marking the capture first, so this hook
@@ -10342,11 +10371,13 @@ static sp_Proc *sp_curry_to_proc(sp_Curry *cy) {
    carries, #3885) takes the arguments and realizes once it has them, the way
    the typed `curry[x]` path does. */
 static sp_RbVal sp_poly_callable_call(sp_RbVal v, sp_int n, const sp_int *args) {
-  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_CURRY) {
-    sp_Curry *cy = (sp_Curry *)v.v.p;
-    for (sp_int i = 0; i < n; i++) cy = sp_curry_apply(cy, _sp_proc_poly_args[i]);
-    return sp_curry_realize_poly(cy);
-  }
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_CURRY)
+    return sp_curry_call_poly((sp_Curry *)v.v.p, n < 16 ? n : 16, _sp_proc_poly_args);
+  /* anything else that is not a Proc is CRuby's NoMethodError -- the raw
+     cast below read a boxed Integer as a proc pointer and crashed (a
+     realized curry applied once more used to reach it) */
+  if (v.tag != SP_TAG_OBJ || !v.v.p || v.cls_id != SP_BUILTIN_PROC)
+    sp_raise_cls("NoMethodError", sp_nomethod_msg("call", v));
   sp_int slots[16];
   for (sp_int i = 0; i < n && i < 16; i++) slots[i] = args[i];
   sp_proc_call((sp_Proc *)v.v.p, n, slots);

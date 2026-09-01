@@ -5675,36 +5675,51 @@ TyKind ewo_memo_elem_type(Compiler *c, int callid) {
   return acc2;
 }
 
-/* The arity and body-return type of the proc a curry was built from. */
-/* The base proc of a curry: its required-parameter count, whether it takes a
-   rest param (`*a`, so any arity is acceptable), and whether it is a lambda.
-   Answers 0 when `recv` is not a recognizable proc/lambda definition. */
-int curry_base_info(Compiler *c, int recv, int *nreq, int *variadic, int *is_lambda) {
+/* The maximum count Proc#curry(n) may name for `recv`'s base: requireds +
+   optionals + posts of a visible definition -- CRuby's max_arity, which only
+   the AST can see (the runtime meta carries no maximum). -1: unlimited (a
+   rest), unknown (untraceable, keywords), or already fixed (the runtime
+   validates a non-negative target arity by itself). */
+int curry_count_max(Compiler *c, int recv) {
   NodeTable *nt = (NodeTable *)c->nt;
   int body = -1, pn = -1;
-  if (!fwd_callable_def(c, recv, &body, &pn)) return 0;
-  int rn = 0; if (pn >= 0) nt_arr(nt, pn, "requireds", &rn);
-  if (nreq) *nreq = rn;
-  if (variadic) *variadic = pn >= 0 && nt_ref(nt, pn, "rest") >= 0;
-  if (is_lambda) {
-    const char *bt = nt_type(nt, body);
-    (void)bt;
-    *is_lambda = 0;
-    /* a LambdaNode's body is owned by the lambda node itself */
-    for (int k = 0; k < nt->count; k++) {
-      if (nt_kind(nt, k) != NK_LambdaNode) continue;
-      if (nt_ref(nt, k, "body") == body) { *is_lambda = 1; break; }
-    }
-  }
-  return 1;
+  /* the walker's return demands a body; the max only needs the params, and
+     an empty lambda (`->(x, y = 2) { }`) has params but no body */
+  (void)fwd_callable_def(c, recv, &body, &pn);
+  if (pn < 0) return -1;
+  if (nt_ref(nt, pn, "rest") >= 0) return -1;
+  /* CRuby's max counts the whole keyword hash -- required, optional or
+     **rest -- as one more slot */
+  int kn = 0; nt_arr(nt, pn, "keywords", &kn);
+  int kw1 = (kn > 0 || nt_ref(nt, pn, "keyword_rest") >= 0) ? 1 : 0;
+  int rn = 0, on = 0, po = 0;
+  nt_arr(nt, pn, "requireds", &rn);
+  nt_arr(nt, pn, "optionals", &on);
+  nt_arr(nt, pn, "posts", &po);
+  return rn + on + po + kw1;
 }
 
+/* The arity and body-return type of the proc a curry was built from. */
 static int curry_proc_base(Compiler *c, int recv, int *arity, TyKind *ret) {
   NodeTable *nt = (NodeTable *)c->nt;
   int body = -1, pn = -1;
   if (!fwd_callable_def(c, recv, &body, &pn)) return 0;
-  int rn = 0; if (pn >= 0) nt_arr(nt, pn, "requireds", &rn);
-  *arity = rn;
+  /* CRuby's curry completes at the MIN arity, which counts trailing posts
+     (`->(a, *r, z)`: 2) and required keywords (`->(a, b:)`: 2) alongside the
+     leading requireds -- an undercount realized the curry early, calling the
+     target short. */
+  int rn = 0, po = 0, kreq = 0;
+  if (pn >= 0) {
+    nt_arr(nt, pn, "requireds", &rn);
+    nt_arr(nt, pn, "posts", &po);
+    int kn = 0; const int *kws = nt_arr(nt, pn, "keywords", &kn);
+    for (int k = 0; k < kn && !kreq; k++) {
+      const char *kty = kws ? nt_type(nt, kws[k]) : NULL;
+      /* however many required keywords, CRuby's min counts the one hash */
+      if (kty && sp_streq(kty, "RequiredKeywordParameterNode")) kreq = 1;
+    }
+  }
+  *arity = rn + po + kreq;
   int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
   *ret = bn > 0 ? infer_type(c, bb[bn - 1]) : TY_NIL;
   return 1;
@@ -5727,18 +5742,18 @@ static int curry_chain(Compiler *c, int node, int *applied, int *arity, TyKind *
       /* `curry(n)` fixes the arity the chain completes at, whatever the base
          proc declares -- a `proc { |a, b, c| }` curried at 2 realizes after
          two applications, and a variadic lambda takes its arity from n only
-         (#3680) */
+         (#3680). `curry(nil)` is CRuby's spelling of no count at all. With
+         no count the chain completes at the base's REQUIRED count -- CRuby's
+         min arity -- so a variadic base realizes on its first call, however
+         many arguments it carries (`->(*a) { }.curry.call` invokes). A count
+         the chain cannot read here (a variable, a to_int object) makes
+         saturation a run-time property: hand the chain to the poly path. */
       int ca = nt_ref(nt, node, "arguments");
       int cac = 0; const int *cav = ca >= 0 ? nt_arr(nt, ca, "arguments", &cac) : NULL;
       if (cac == 1 && cav && nt_kind(nt, cav[0]) == NK_IntegerNode)
         *arity = (int)nt_int(nt, cav[0], "value", *arity);
-      else if (*arity == 0) {
-        /* a VARIADIC base with no count takes its arity from the first
-           application; a genuinely zero-arity base realizes with none */
-        int vr = 0;
-        curry_base_info(c, recv, NULL, &vr, NULL);
-        if (vr) *arity = 1;
-      }
+      else if (cac >= 1 && !(cac == 1 && cav && nt_kind(nt, cav[0]) == NK_NilNode))
+        return 0;
       *applied = 0;
       return 1;
     }

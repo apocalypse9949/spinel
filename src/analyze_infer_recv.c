@@ -278,6 +278,8 @@ int infer_numeric_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   /* A curried proc reports as a lambda Proc (#2651). */
   if (rt == TY_CURRY && argc == 0 && sp_streq(name, "arity")) { *out = TY_INT; return 1; }
   if (rt == TY_CURRY && argc == 0 && sp_streq(name, "lambda?")) { *out = TY_BOOL; return 1; }
+  if (rt == TY_CURRY && argc == 0 && sp_streq(name, "to_proc")) { *out = TY_PROC; return 1; }
+  if (rt == TY_CURRY && argc == 0 && sp_streq(name, "parameters")) { *out = TY_POLY_ARRAY; return 1; }
 
   /* clamp(lo, hi) with a nil (open) bound returns the receiver or the applied
      bound unchanged, boxed to preserve its class (#2588). */
