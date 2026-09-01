@@ -50,6 +50,20 @@
 # define SP_SSL_PEER_CERT(ssl) SSL_get1_peer_certificate(ssl)
 #endif
 
+/* EVP_CTRL_AEAD_SET_IVLEN is the generic spelling of what older headers call
+   EVP_CTRL_GCM_SET_IVLEN, and for GCM the two are the same control: OpenSSL
+   defines the GCM name AS the AEAD one. A header set that has only the older
+   name (LibreSSL 3.1.5) gets it here rather than failing to compile (#4253). */
+#if !defined(EVP_CTRL_AEAD_SET_IVLEN) && defined(EVP_CTRL_GCM_SET_IVLEN)
+# define EVP_CTRL_AEAD_SET_IVLEN EVP_CTRL_GCM_SET_IVLEN
+#endif
+#if !defined(EVP_CTRL_AEAD_GET_TAG) && defined(EVP_CTRL_GCM_GET_TAG)
+# define EVP_CTRL_AEAD_GET_TAG EVP_CTRL_GCM_GET_TAG
+#endif
+#if !defined(EVP_CTRL_AEAD_SET_TAG) && defined(EVP_CTRL_GCM_SET_TAG)
+# define EVP_CTRL_AEAD_SET_TAG EVP_CTRL_GCM_SET_TAG
+#endif
+
 #define SP_SSL_MAX 256          /* concurrent TLS connections per process */
 #define SP_SSL_BUF 65536
 

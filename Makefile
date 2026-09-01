@@ -86,7 +86,15 @@ SPINEL = bin/spinel
 # compile-and-link probe, so a stale or partial install cannot flip this to
 # yes and then fail at the package's own link. On a host where the bare
 # probe already passes, nothing below runs and the build is unchanged.
-SP_OSSL_PROBE = $(shell printf '\043include <openssl/ssl.h>\nint main(void){return TLS_client_method()!=0;}\n' > /tmp/sp_ossl_probe.c 2>/dev/null && $(CC) $(1) /tmp/sp_ossl_probe.c -lssl -lcrypto -o /tmp/sp_ossl_probe >/dev/null 2>&1 && echo yes)
+# TWO questions, because they have different answers. The link probe says
+# libssl is here and usable. The syntax-only compile of the package's own
+# source says THIS file can be built against it -- a version floor, a renamed
+# API, a missing macro. A header set that answers the first and not the second
+# (LibreSSL 3.1.5, whose TLS_client_method exists but whose evp.h has no
+# EVP_CTRL_AEAD_SET_IVLEN) used to pass the probe and then stop `make` in the
+# middle with a #error. Compiling the real file rather than a copy of its
+# version guard is what keeps the two from drifting (#4253).
+SP_OSSL_PROBE = $(shell printf '\043include <openssl/ssl.h>\nint main(void){return TLS_client_method()!=0;}\n' > /tmp/sp_ossl_probe.c 2>/dev/null && $(CC) $(1) /tmp/sp_ossl_probe.c -lssl -lcrypto -o /tmp/sp_ossl_probe >/dev/null 2>&1 && $(CC) $(1) -fsyntax-only -Ilib -Ipackages/openssl packages/openssl/sp_openssl.c >/dev/null 2>&1 && echo yes)
 OPENSSL_AVAILABLE := $(call SP_OSSL_PROBE,)
 ifneq ($(OPENSSL_AVAILABLE),yes)
 # `brew --prefix` first: it knows a non-default HOMEBREW_PREFIX, which the
