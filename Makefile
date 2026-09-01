@@ -550,7 +550,16 @@ RBS_SEED_STRICT := -Werror=incompatible-pointer-types
 # compiler kind and $(OPT) because a PCH only loads under the exact flags
 # it was built with (for clang a mismatch is a hard error, not a fallback).
 CC_KIND  := $(if $(findstring clang,$(shell $(CC) --version 2>/dev/null | head -1)),clang,gcc)
-PCH_ROOT := build/pch/$(CC_KIND)$(subst -,,$(OPT))
+# The key has to be ONE path component: $(OPT) is a flag LIST, so a
+# multi-flag setting (`COPT := -O2 -g0` in config.mk) put a space in the
+# middle and every use of PCH_ROOT then split into two words -- two make
+# targets, an -I pointing at the wrong directory, and a mkdir of /plain
+# (#4256). Strip the characters that cannot appear in one component:
+# the dashes the key never wanted, then spaces, slashes and equals.
+sp_empty :=
+sp_space := $(sp_empty) $(sp_empty)
+sp_pathify = $(subst =,,$(subst /,,$(subst $(sp_space),,$(subst -,,$(1)))))
+PCH_ROOT := build/pch/$(CC_KIND)$(call sp_pathify,$(OPT))
 PCH_FLAGS = $(CFLAGS) $(SP_OV_DEFINE) -Werror $(TEST_WARN_SUPPRESS) $(SEC_FLAGS)
 PCH_PLAIN  := $(PCH_ROOT)/plain/spinel_rt.h.gch
 PCH_NOPOLY := $(PCH_ROOT)/nopoly/spinel_rt.h.gch
