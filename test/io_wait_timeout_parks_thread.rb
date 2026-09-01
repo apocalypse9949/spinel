@@ -26,7 +26,6 @@ n.times { arrived.pop }
 sleep 0.05
 t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 w.write "x"
-w.flush   # CRuby makes a pipe's write end sync; spinel does not (yet), and this test is about the scheduler
 threads.each(&:join)
 total = 0
 n.times { total += seen.pop }
