@@ -19590,8 +19590,10 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
          * every user exception subclass struct (codegen emits it in
          * the struct definition for ivar-bearing classes; nivars==0
          * subclasses are typedef'd to sp_Exception). So `_t->backtrace`
-         * is valid for both shapes. */
-        buf_printf(b, "); sp_StrArray *_t%d_bt = _t%d->backtrace; _t%d_bt ? _t%d_bt : sp_backtrace_captured(); })", tbt, tbt, tbt, tbt);
+         * is valid for both shapes. CRuby returns nil for a fresh
+         * exception that never had set_backtrace called; we do the
+         * same. sp_StrArray_inspect handles NULL and prints "nil". */
+        buf_printf(b, "); _t%d->backtrace; })", tbt);
         return;
       }
       { int tfm = ++g_tmp;
@@ -19675,7 +19677,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
        * of reading an unrelated ivar as a backtrace. The chain
        * check above already stood down for any class that defines
        * its own #backtrace. */
-      buf_printf(b, "); sp_StrArray *_t%d_bt = _t%d->backtrace; _t%d_bt ? _t%d_bt : sp_backtrace_captured(); })", t, t, t, t);
+      buf_printf(b, "); _t%d->backtrace; })", t);
       return;
     }
   }
