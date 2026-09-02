@@ -648,6 +648,19 @@ static inline sp_gc_hdr *sp_pool_try_pop(sp_gc_hdr **head) {
 }
 #define SP_POOL_CTR_INC(c) __atomic_fetch_add(&(c), 1, __ATOMIC_RELAXED)
 #define SP_POOL_CTR_DEC(c) __atomic_fetch_sub(&(c), 1, __ATOMIC_RELAXED)
+#define SP_POOL_RECYCLE_BODY(CLS, h) \
+    if (__atomic_load_n(&sp_##CLS##_pool_count, __ATOMIC_RELAXED) >= sp_##CLS##_pool_max) { \
+      free(h); __atomic_fetch_add(&sp_##CLS##_pool_freed, 1, __ATOMIC_RELAXED); return; \
+    } \
+    { sp_gc_hdr *_old; \
+      do { _old = __atomic_load_n(&sp_##CLS##_pool_head, __ATOMIC_ACQUIRE); (h)->next = _old; \
+      } while (!__atomic_compare_exchange_n(&sp_##CLS##_pool_head, &_old, (h), \
+                                            0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)); } \
+    { long _c = __atomic_add_fetch(&sp_##CLS##_pool_count, 1, __ATOMIC_RELAXED); \
+      __atomic_fetch_add(&sp_##CLS##_pool_pushes, 1, __ATOMIC_RELAXED); \
+      long _hwm = __atomic_load_n(&sp_##CLS##_pool_hwm, __ATOMIC_RELAXED); \
+      while (_c > _hwm && !__atomic_compare_exchange_n(&sp_##CLS##_pool_hwm, &_hwm, _c, \
+                                                       1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {} }
 #else
 static inline sp_gc_hdr *sp_pool_try_pop(sp_gc_hdr **head) {
   sp_gc_hdr *old = *head;
@@ -656,6 +669,15 @@ static inline sp_gc_hdr *sp_pool_try_pop(sp_gc_hdr **head) {
 }
 #define SP_POOL_CTR_INC(c) ((c)++)
 #define SP_POOL_CTR_DEC(c) ((c)--)
+#define SP_POOL_RECYCLE_BODY(CLS, h) \
+    if (sp_##CLS##_pool_count >= sp_##CLS##_pool_max) { \
+      free(h); sp_##CLS##_pool_freed++; return; \
+    } \
+    (h)->next = sp_##CLS##_pool_head; \
+    sp_##CLS##_pool_head = (h); \
+    sp_##CLS##_pool_count++; \
+    sp_##CLS##_pool_pushes++; \
+    if (sp_##CLS##_pool_count > sp_##CLS##_pool_hwm) sp_##CLS##_pool_hwm = sp_##CLS##_pool_count;
 #endif
 #define SP_POOL_DEFINE(CLS) \
   static sp_gc_hdr *sp_##CLS##_pool_head = NULL; \
@@ -669,17 +691,14 @@ static inline sp_gc_hdr *sp_pool_try_pop(sp_gc_hdr **head) {
     const char *m = getenv("SP_POOL_MAX"); \
     if (m && *m) { long v = atol(m); if (v >= 0) sp_##CLS##_pool_max = v; } \
   } \
-  /* Runs only from the sweep (stop-the-world in the threaded build), so the
-     list mutation needs no CAS -- no pop can run concurrently. */ \
+  /* Runs only from the sweep, so no pop can run concurrently -- but the sweep
+     is PARALLEL in the threaded build (sp_sched_par_sweep: every parked worker
+     sweeps its own slot), so several workers push onto this one list at once.
+     A plain push there loses nodes and tears the counters; the threaded arm
+     pushes with the same CAS loop sp_PolyArray_pool_recycle uses, and counts
+     atomically. Single-threaded: the exact plain code this always had. */ \
   static void sp_##CLS##_pool_recycle(sp_gc_hdr *h) { \
-    if (sp_##CLS##_pool_count >= sp_##CLS##_pool_max) { \
-      free(h); sp_##CLS##_pool_freed++; return; \
-    } \
-    h->next = sp_##CLS##_pool_head; \
-    sp_##CLS##_pool_head = h; \
-    sp_##CLS##_pool_count++; \
-    sp_##CLS##_pool_pushes++; \
-    if (sp_##CLS##_pool_count > sp_##CLS##_pool_hwm) sp_##CLS##_pool_hwm = sp_##CLS##_pool_count; \
+    SP_POOL_RECYCLE_BODY(CLS, h) \
   } \
   __attribute__((destructor)) static void sp_##CLS##_pool_report(void) { \
     const char *e = getenv("SP_POOL_REPORT"); \
