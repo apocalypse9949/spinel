@@ -782,7 +782,10 @@ int emit_call_or_write_via_methods(Compiler *c, int id, int is_or, Buf *b) {
   TyKind rdt = (rk == SP_MEMBER_METHOD) ? (TyKind)c->scopes[rmi].ret : TY_UNKNOWN;
   if (rdt == TY_UNKNOWN || rdt == TY_VOID) rdt = want;
   TyKind vt = comp_ntype(c, v);
-  if (vt == TY_UNKNOWN || vt == TY_VOID) vt = want;
+  /* TY_NIL joins them: emit_ctype spells it `void`, so a literal nil on the
+     right declared a void temp. nil is a value here (`u.g ||= nil` is nil in
+     CRuby), and the slot that has to hold it is the poly one. */
+  if (vt == TY_UNKNOWN || vt == TY_VOID || vt == TY_NIL) vt = want;
 
   int tr = ++g_tmp, tv = ++g_tmp, tw = ++g_tmp;
   buf_puts(b, "({ ");
@@ -820,7 +823,16 @@ int emit_call_or_write_via_methods(Compiler *c, int id, int is_or, Buf *b) {
     else emit_unbox_nilable_text(c, want, sv, b);
   }
   buf_puts(b, " : ({ ");
-  emit_ctype(c, vt, b); buf_printf(b, " _t%d = ", tw); emit_expr(c, v, b); buf_puts(b, "; ");
+  emit_ctype(c, vt, b); buf_printf(b, " _t%d = ", tw);
+  /* An empty container literal has no type of its own: comp_ntype answers
+     poly and the emitter picks the concrete container from how the attribute
+     is used later, so `_t%d` was declared sp_RbVal and initialized with an
+     sp_IntArray * (#4277). Render it into the slot the declaration promises.
+     Every other value type answers the same both ways, so this changes only
+     the shapes that did not compile. */
+  if (vt == TY_POLY && comp_ntype(c, v) != TY_POLY) emit_boxed(c, v, b);
+  else emit_expr(c, v, b);
+  buf_puts(b, "; ");
   if (vt == TY_POLY) buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d); ", tw);
   else if (!is_scalar_ret(vt) && !comp_ty_value_obj(c, vt)) buf_printf(b, "SP_GC_ROOT(_t%d); ", tw);
   buf_puts(b, "(void)(");
