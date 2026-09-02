@@ -6157,7 +6157,15 @@ TyKind infer_uncached(Compiler *c, int id) {
       }
     }
     LocalVar *lv = nm ? comp_const(c, nm) : NULL;
-    if (lv) return lv->type;
+    /* Same guard the bare ConstantReadNode carries: a registered constant
+       whose type never settled (Block = Struct.new(:kind), which registers
+       the name before the anonymous class exists) must not shadow the
+       class-table fallback below. Without it `Probe::Block` read as a value
+       is TY_UNKNOWN, the slot is sp_RbVal, and boxing an unknown kind takes
+       the nil tail -- so the class id is emitted and then discarded by a
+       comma expression. The bare form was already guarded; only the
+       qualified path was not (#4271). */
+    if (lv && lv->type != TY_UNKNOWN) return lv->type;
     /* A top-level scoped constant `::Name` (no parent) names the same thing as
        the bare constant `Name`; resolve it as a class when it is one so is_a?,
        case/when, etc. treat `::Integer` exactly like `Integer` (#2683). */

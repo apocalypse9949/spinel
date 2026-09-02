@@ -4064,6 +4064,19 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
             if (pt == TY_POLY) buf_printf(b, "; sp_frange_cover(_t%d, sp_poly_to_f(_t%d)); })", tr, t);
             else buf_printf(b, "; sp_frange_cover(_t%d, (sp_float)_t%d); })", tr, t);
           }
+          else if (comp_ntype(c, conds[j]) == TY_CLASS) {
+            /* `when <class value>`: Module#=== is instance membership, tested
+               at run time against whatever class the value holds -- the same
+               shape a variable pattern already uses (#4271). Comparing the
+               subject to the class with `==` did not even compile. */
+            char scref[32]; snprintf(scref, sizeof scref, "_t%d", t);
+            buf_puts(b, "sp_poly_is_a_dyn(");
+            if (pt == TY_POLY) buf_puts(b, scref);
+            else emit_boxed_text(c, pt, scref, b);
+            buf_puts(b, ", sp_box_class(");
+            emit_expr(c, conds[j], b);
+            buf_puts(b, "), 0)");
+          }
           else if (eq_family(pt) && eq_family(comp_ntype(c, conds[j])) && eq_family(pt) != eq_family(comp_ntype(c, conds[j]))) {
             /* a when value of a different comparable family never matches */
             buf_puts(b, "0");
@@ -4408,6 +4421,16 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
           buf_printf(b, "({ sp_FloatRange _t%d = ", tr); emit_expr(c, conds[j], b);
           if (pt == TY_POLY) buf_printf(b, "; sp_frange_cover(_t%d, sp_poly_to_f(_t%d)); })", tr, t);
           else buf_printf(b, "; sp_frange_cover(_t%d, (sp_float)_t%d); })", tr, t);
+        }
+        else if (comp_ntype(c, conds[j]) == TY_CLASS) {
+          /* `when <class value>`: membership at run time (#4271), as above */
+          char scref[32]; snprintf(scref, sizeof scref, "_t%d", t);
+          buf_puts(b, "sp_poly_is_a_dyn(");
+          if (pt == TY_POLY) buf_puts(b, scref);
+          else emit_boxed_text(c, pt, scref, b);
+          buf_puts(b, ", sp_box_class(");
+          emit_expr(c, conds[j], b);
+          buf_puts(b, "), 0)");
         }
         else if (eq_family(pt) && eq_family(comp_ntype(c, conds[j])) && eq_family(pt) != eq_family(comp_ntype(c, conds[j]))) {
           buf_puts(b, "0");

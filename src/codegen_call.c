@@ -21176,7 +21176,9 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         }
       }
     }
-    if ((sp_streq(name, "==" ) || sp_streq(name, "eql?")) && argc == 1) {
+    /* `equal?` joins them: a class is one object per name, so identity and
+       equality are the same question here (#4271). */
+    if ((sp_streq(name, "==" ) || sp_streq(name, "eql?") || sp_streq(name, "equal?")) && argc == 1) {
       TyKind at = comp_ntype(c, argv[0]);
       if (at == TY_CLASS) {
         buf_printf(b, "({ sp_Class _cl%d = ", _clt); emit_expr(c, recv, b);

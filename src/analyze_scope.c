@@ -1642,8 +1642,40 @@ void register_singleton_defs(Compiler *c) {
   free(m.wkey); free(m.wci);
 }
 
+/* Stamp every ConstantWriteNode with the index of the class or module whose
+   body lexically encloses it. `Const = Struct.new(...)` defines a class just
+   as `class Const` does, but it arrives here as a plain constant write with no
+   scope around it, so the class was created with enclosing_class == -1 and
+   class_ruby_name -- which builds the Ruby-visible name by walking that link
+   -- answered the bare leaf. `Probe::Block.name` was "Block" where a declared
+   `class Block` in the same module answered "Probe::Block" (#4271).
+   Registration keys on the leaf name either way; only the visible name moves.
+   Runs after walk_scope, so the enclosing module already has its class. */
+static void stamp_const_write_encl(Compiler *c, int id, int ci) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return;
+  const char *ty = nt_type(nt, id);
+  if (!ty) return;
+  if (sp_streq(ty, "ClassNode") || sp_streq(ty, "ModuleNode")) {
+    int cp = nt_ref(nt, id, "constant_path");
+    const char *mn = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+    int mci = mn ? comp_class_index(c, mn) : -1;
+    if (mci >= 0) ci = mci;
+  }
+  else if (sp_streq(ty, "ConstantWriteNode") && ci >= 0)
+    nt_node_set_int((NodeTable *)nt, id, "sg_encl_class", ci);
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++) stamp_const_write_encl(c, nt_ref_at(nt, id, i), ci);
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int m = 0; const int *ids = nt_arr_at(nt, id, i, &m);
+    for (int k = 0; k < m; k++) stamp_const_write_encl(c, ids[k], ci);
+  }
+}
+
 void register_structs(Compiler *c) {
   const NodeTable *nt = c->nt;
+  stamp_const_write_encl(c, nt->root_id, -1);
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty) continue;
@@ -1664,7 +1696,10 @@ void register_structs(Compiler *c) {
           register_struct_members(c, ex, val);
       }
       else {
-        register_struct_members(c, comp_class_new(c, cname, id), val);
+        ClassInfo *ni = comp_class_new(c, cname, id);
+        int encl = (int)nt_int(nt, id, "sg_encl_class", -1);
+        if (encl >= 0 && encl < c->nclasses) ni->enclosing_class = encl;
+        register_struct_members(c, ni, val);
       }
     }
     /* k = Struct.new(:a, :b): an anonymous struct class held in a local.
