@@ -621,16 +621,17 @@ static void sp_gc_pool_relink(sp_gc_hdr *h) {
    at exit. */
 #define SP_POOL_DEFAULT_MAX 1048576L
 /* Pool concurrency (threaded build). The free lists stay SHARED across
-   workers -- pushes (recycle) happen only during the stop-the-world sweep,
-   where every mutator is parked, so they stay plain stores; pops run
-   concurrently on any worker and go through a lock-free CAS (below). A
-   concurrent-pop-only Treiber stack has no ABA window: a popped node can
-   only reappear on the list via the sweep, and no sweep can run while a
-   mutator is mid-pop (it is not at a safepoint). A shared list also keeps
+   workers. Pushes (recycle) happen only during the stop-the-world sweep,
+   where every mutator is parked -- but the sweep itself is PARALLEL
+   (sp_sched_par_sweep: every parked worker sweeps its own slot), so several
+   workers push onto one list at once, and a push is a CAS loop with atomic
+   counters, like a pop. Pops run concurrently on any worker through the
+   lock-free CAS below. Pushes and pops never overlap each other: a popped
+   node can only reappear on the list via the sweep, and no sweep can run
+   while a mutator is mid-pop (it is not at a safepoint), so the Treiber
+   stack has no ABA window in either direction. A shared list also keeps
    recycled storage visible to every worker -- per-worker (TLS) lists would
    strand the whole recycle crop on whichever worker ran the collection.
-   pool_count/pops are adjusted by concurrent poppers, so they use relaxed
-   atomics; pushes/freed/hwm are sweep-only (exclusive), so they stay plain.
    Single-threaded: the macros expand to the exact plain code this had. */
 #ifdef SP_THREADS
 static inline sp_gc_hdr *sp_pool_try_pop(sp_gc_hdr **head) {
@@ -648,16 +649,22 @@ static inline sp_gc_hdr *sp_pool_try_pop(sp_gc_hdr **head) {
 }
 #define SP_POOL_CTR_INC(c) __atomic_fetch_add(&(c), 1, __ATOMIC_RELAXED)
 #define SP_POOL_CTR_DEC(c) __atomic_fetch_sub(&(c), 1, __ATOMIC_RELAXED)
+/* The cap is reserved before the push, not checked beside it: a load-then-add
+   lets every concurrent sweeper see room and all of them push, overshooting
+   pool_max by up to their number. Add first; over the cap, give the slot back
+   and free the storage. The count rises and falls by one per over-cap sweeper
+   in between, which nothing reads for anything but the same cap. */
 #define SP_POOL_RECYCLE_BODY(CLS, h) \
-    if (__atomic_load_n(&sp_##CLS##_pool_count, __ATOMIC_RELAXED) >= sp_##CLS##_pool_max) { \
+    long _c = __atomic_add_fetch(&sp_##CLS##_pool_count, 1, __ATOMIC_RELAXED); \
+    if (_c > sp_##CLS##_pool_max) { \
+      __atomic_fetch_sub(&sp_##CLS##_pool_count, 1, __ATOMIC_RELAXED); \
       free(h); __atomic_fetch_add(&sp_##CLS##_pool_freed, 1, __ATOMIC_RELAXED); return; \
     } \
     { sp_gc_hdr *_old; \
       do { _old = __atomic_load_n(&sp_##CLS##_pool_head, __ATOMIC_ACQUIRE); (h)->next = _old; \
       } while (!__atomic_compare_exchange_n(&sp_##CLS##_pool_head, &_old, (h), \
                                             0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)); } \
-    { long _c = __atomic_add_fetch(&sp_##CLS##_pool_count, 1, __ATOMIC_RELAXED); \
-      __atomic_fetch_add(&sp_##CLS##_pool_pushes, 1, __ATOMIC_RELAXED); \
+    { __atomic_fetch_add(&sp_##CLS##_pool_pushes, 1, __ATOMIC_RELAXED); \
       long _hwm = __atomic_load_n(&sp_##CLS##_pool_hwm, __ATOMIC_RELAXED); \
       while (_c > _hwm && !__atomic_compare_exchange_n(&sp_##CLS##_pool_hwm, &_hwm, _c, \
                                                        1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {} }
