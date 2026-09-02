@@ -15045,6 +15045,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         buf_printf(g_pre, " _t%d = %s;\n", t,
                    bt == TY_RANGE ? "(sp_Range){0}" : default_value(bt));
         /* Kernel#loop rescues StopIteration to terminate; wrap in a setjmp. */
+        emit_indent(g_pre, g_indent); buf_puts(g_pre, "sp_exc_check_depth();\n");
         emit_indent(g_pre, g_indent); buf_puts(g_pre, "sp_exc_rootmark[sp_exc_top] = sp_gc_nroots;\n");
         emit_indent(g_pre, g_indent); buf_puts(g_pre, "sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;\n");
         emit_indent(g_pre, g_indent); buf_puts(g_pre, "if (setjmp(sp_exc_stack[sp_exc_top-1]) == 0) {\n");
@@ -15107,6 +15108,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int t = ++g_tmp;
       emit_indent(g_pre, g_indent); emit_ctype(c, bt, g_pre);
       buf_printf(g_pre, " _t%d = %s;\n", t, default_value(bt));
+      emit_indent(g_pre, g_indent); buf_puts(g_pre, "sp_catch_check_depth();\n");
       int tag_kind = 0;
       if (argc == 1) {
         emit_indent(g_pre, g_indent);
@@ -28652,7 +28654,7 @@ else {
                  eid, eid, eid, eid);
       if (has_retval) { emit_ctype(c, g_ret_type, b); buf_printf(b, " _retv%d = %s; ", eid, default_value(g_ret_type)); }
       g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth };
-      buf_puts(b, "sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; ");
+      buf_puts(b, "sp_exc_check_depth(); sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; ");
       buf_puts(b, "sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++; if (setjmp(sp_exc_stack[sp_exc_top-1]) == 0) { ");
       g_exc_frame_depth++;
     }

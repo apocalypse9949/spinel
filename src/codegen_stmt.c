@@ -5905,6 +5905,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       buf_printf(b, "%s:;\n", ens_retry_label);
       g_retry_label = ens_retry_label;
     }
+    emit_indent(b, indent); buf_puts(b, "sp_exc_check_depth();\n");
     emit_indent(b, indent); buf_puts(b, "sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp;\n");
     emit_indent(b, indent); buf_puts(b, "sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;\n");
     emit_indent(b, indent); buf_puts(b, "if (setjmp(sp_exc_stack[sp_exc_top-1]) == 0) {\n");
@@ -6062,6 +6063,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
   const char *saved_retry = g_retry_label;
   if (has_retry) g_retry_label = retry_label;
 
+  emit_indent(b, indent); buf_puts(b, "sp_exc_check_depth();\n");
   emit_indent(b, indent); buf_puts(b, "sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp;\n");
   emit_indent(b, indent); buf_puts(b, "sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;\n");
   emit_indent(b, indent); buf_puts(b, "if (setjmp(sp_exc_stack[sp_exc_top-1]) == 0) {\n");
@@ -9765,6 +9767,7 @@ else {
        fall through to the rescue expression on any exception. */
     int e = nt_ref(nt, id, "expression");
     int r = nt_ref(nt, id, "rescue_expression");
+    emit_indent(b, indent); buf_puts(b, "sp_exc_check_depth();\n");
     emit_indent(b, indent); buf_puts(b, "sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp;\n");
     emit_indent(b, indent); buf_puts(b, "sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;\n");
     emit_indent(b, indent); buf_puts(b, "if (setjmp(sp_exc_stack[sp_exc_top-1]) == 0) {\n");

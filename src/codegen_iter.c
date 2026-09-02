@@ -2138,6 +2138,7 @@ int emit_array_filter_loop(Compiler *c, int recv, int block, TyKind rt, const ch
       buf_printf(b, " _retv%d = %s;\n", eid, default_value(g_ret_type));
     }
     g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth };
+    emit_indent(b, indent); buf_puts(b, "sp_exc_check_depth();\n");
     emit_indent(b, indent); buf_puts(b, "sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp;\n");
     emit_indent(b, indent); buf_puts(b, "sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;\n");
     emit_indent(b, indent); buf_puts(b, "if (setjmp(sp_exc_stack[sp_exc_top-1]) == 0) {\n");
@@ -2316,6 +2317,7 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
        StopIteration falls through, any other exception re-raises. */
     int gcl = ++g_tmp;
     emit_indent(b, indent); buf_printf(b, "int _gcb%d = sp_gc_nroots; (void)_gcb%d;\n", gcl, gcl);
+    emit_indent(b, indent); buf_puts(b, "sp_exc_check_depth();\n");
     emit_indent(b, indent); buf_puts(b, "sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;\n");
     emit_indent(b, indent); buf_puts(b, "if (setjmp(sp_exc_stack[sp_exc_top-1]) == 0) {\n");
     emit_indent(b, indent + 1); buf_puts(b, "for (;;) {\n");

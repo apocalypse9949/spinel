@@ -7987,6 +7987,28 @@ static void sp_rescue_push(void *e) {
   }
   sp_exc_handling[sp_rescue_sp++] = e;
 }
+/* Each of the fixed-depth handler stacks below fails the same way when a
+   program nests deeper than its array holds: CRuby's SystemStackError words,
+   on stderr, and out. One copy of them, called from each stack's check. Not a
+   Ruby SystemStackError -- catching one needs a handler slot, which is exactly
+   what has run out. (sp_rescue_push above keeps its own older wording, which
+   names the nesting that overflowed.) */
+SP_NORETURN SP_COLD static void sp_stack_too_deep(void) {
+  fputs("stack level too deep (SystemStackError)\n", stderr);
+  exit(1);
+}
+/* Guard an exception-frame arm. Every arm stores into sp_exc_rootmark
+   [sp_exc_top] (or sp_exc_msg[sp_exc_top]) before it bumps sp_exc_top, so what
+   the check must precede is that first indexed store, not the ++; it opens the
+   frame-arming sequence at every arm the codegen emits. The depth is not a
+   lexical property: a method whose body is a begin/rescue keeps its frame armed
+   across the calls that body makes, so ordinary recursion 65 deep reaches the
+   end of the array just as 65 nested begins do. Inside a fiber body, and inside
+   a thread's, one slot is already spent on the frame the runtime arms around it
+   (sp_exc_arm below), so 63 of the body's own is the last that fits. */
+static inline void sp_exc_check_depth(void) {
+  if (SP_UNLIKELY(sp_exc_top >= SP_EXC_STACK_MAX)) sp_stack_too_deep();
+}
 /* ---- Native backtrace formatting (spinel --debug) ---------------------- */
 /* True for sp_<name> symbols that are runtime helpers, not user Ruby methods.
    A denylist of the lowercase runtime prefixes; user methods are sp_<rubyname>
@@ -8523,6 +8545,11 @@ static SP_TLS sp_RbVal sp_catch_val[SP_CATCH_STACK_MAX];
 static SP_TLS int sp_catch_exc_top[SP_CATCH_STACK_MAX];  /* exception depth at each catch's entry */
 static SP_TLS int sp_catch_rootmark[SP_CATCH_STACK_MAX]; /* GC-root watermark at entry (see sp_exc_rootmark) */
 static SP_TLS volatile int sp_catch_top = 0;
+/* Guard a catch push, like sp_exc_check_depth: the arm's first store is
+   sp_catch_tag[sp_catch_top], so this runs in front of it. */
+static inline void sp_catch_check_depth(void) {
+  if (SP_UNLIKELY(sp_catch_top >= SP_CATCH_STACK_MAX)) sp_stack_too_deep();
+}
 /* shared counter (not SP_TLS) so `catch { |tag| }` autotags are globally
    unique; see sp_brk_seq for the same shape */
 static sp_int sp_catch_seq = 0;
@@ -8560,7 +8587,7 @@ static void sp_throw(const char *tag, int kind, sp_RbVal val) {
    (SP_UNWIND_BREAK) so `ensure` bodies run, exactly like sp_throw and
    sp_proc_return above. The value channel is poly so any break value carries
    faithfully. Per-worker (SP_TLS) and fiber-context-saved like the catch
-   arrays; the push is unchecked like sp_exc_arm / the catch push.
+   arrays; the push is bounded like sp_exc_arm / the catch push.
    The backing storage is heap-allocated on the first push (like
    sp_gc_mark_stack), NOT inline TLS arrays: ~14KB of TLS (a jmp_buf is
    ~200 bytes) shifts every hot TLS variable's layout and cost optcarrot
@@ -8578,11 +8605,8 @@ static sp_int sp_brk_seq = 1;
 static sp_int sp_brk_push(void) {
   /* Fixed-depth stack like sp_exc / sp_catch: guard the push so pathological
      nesting (e.g. deep recursion through .each/.map) fails loudly instead of
-     writing past the array. CRuby's SystemStackError message. */
-  if (sp_brk_top >= SP_BRK_STACK_MAX) {
-    fputs("stack level too deep (SystemStackError)\n", stderr);
-    exit(1);
-  }
+     writing past the array. */
+  if (SP_UNLIKELY(sp_brk_top >= SP_BRK_STACK_MAX)) sp_stack_too_deep();
   if (!sp_brk_stack) {
     sp_brk_stack = (jmp_buf *)malloc(sizeof(jmp_buf) * SP_BRK_STACK_MAX);
     sp_brk_val = (sp_RbVal *)malloc(sizeof(sp_RbVal) * SP_BRK_STACK_MAX);
@@ -8908,7 +8932,7 @@ void sp_exc_ctx_mark(void *p) {            /* GC: mark a suspended fiber's carri
 #ifdef SPINEL_EXT_HOST
 void sp_exc_arm(jmp_buf b);
 #else
-void sp_exc_arm(jmp_buf b)     { memcpy(sp_exc_stack[sp_exc_top], b, sizeof(jmp_buf)); sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++; }
+void sp_exc_arm(jmp_buf b)     { sp_exc_check_depth(); memcpy(sp_exc_stack[sp_exc_top], b, sizeof(jmp_buf)); sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++; }
 #endif
 #ifdef SPINEL_EXT_HOST
 void sp_exc_disarm(void);
