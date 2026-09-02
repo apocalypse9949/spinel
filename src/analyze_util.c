@@ -273,6 +273,47 @@ int is_cmp_op(const char *op) {
   static const char *const set[] = {"<", ">", "<=", ">=", NULL};
   return str_in(op, set);
 }
+/* The numeric operations CRuby routes through #coerce: the arithmetic
+   operators, the ordered comparisons and `<=>`, and the named division family.
+   `==` is deliberately absent -- Numeric#== answers false for an operand it
+   cannot coerce rather than asking, so routing it here would turn a plain
+   false into the coerced comparison. */
+int is_numeric_coerce_op(const char *op) {
+  static const char *const set[] = {
+    "+", "-", "*", "/", "%", "**",
+    "<", ">", "<=", ">=", "<=>",
+    "div", "modulo", "remainder", "quo", "fdiv", "divmod", NULL};
+  return str_in(op, set);
+}
+/* 1 if class k defines a #coerce whose SHAPE the protocol can use: one
+   parameter, no rest. Nothing here consults reachability or the return type,
+   because compute_reachable runs long after the type fixpoint -- a predicate
+   that asked would answer 0 for every call the fixpoint makes and the rule
+   would be dormant exactly where it is needed. Typing and emission both ask
+   this, so they agree at every point in the pipeline; whether the coerce
+   dispatch ends up carrying an arm for the class is a separate question that
+   only codegen needs (class_coerce_emittable), and a class that fails it finds
+   the hook unhandled and gets the TypeError CRuby raises for it anyway. */
+int class_has_coerce_shape(Compiler *c, int k) {
+  int mi = comp_method_in_chain(c, k, "coerce", NULL);
+  if (mi < 0) return 0;
+  Scope *m = &c->scopes[mi];
+  return m->nparams == 1 && m->rest_idx < 0;
+}
+/* 1 if class k defines a #coerce this TU emits and can call from the runtime
+   hook: one parameter, no rest, an array return (the [other, self] pair).
+   The coerce protocol needs it for `5 + obj` where obj only reads poly. */
+int class_coerce_emittable(Compiler *c, int k) {
+  int defcls = -1;
+  int mi = comp_method_in_chain(c, k, "coerce", &defcls);
+  if (mi < 0) return 0;
+  Scope *m = &c->scopes[mi];
+  if (!m->reachable || m->yields || scope_is_shadowed(c, mi) || m->is_transplanted_source)
+    return 0;
+  if (m->nparams != 1 || m->rest_idx >= 0) return 0;
+  if (!ty_is_array(m->ret) && m->ret != TY_POLY_ARRAY) return 0;
+  return 1;
+}
 int is_eq_op(const char *op) {
   static const char *const set[] = {"==", "!=", "===", NULL};
   return str_in(op, set);

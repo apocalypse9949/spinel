@@ -3579,7 +3579,7 @@ int bind_coerce_operator_params(Compiler *c) {
   }
   NT_FOREACH_KIND(nt, NK_CallNode, id) {
     const char *nm = nt_str(nt, id, "name");
-    if (!nm || !is_arith_op(nm) || nt_ref(nt, id, "block") >= 0) continue;
+    if (!nm || !is_numeric_coerce_op(nm) || nt_ref(nt, id, "block") >= 0) continue;
     int recv = nt_ref(nt, id, "receiver");
     if (recv < 0) continue;
     TyKind rt = infer_type(c, recv);
@@ -3614,7 +3614,15 @@ int bind_coerce_operator_params(Compiler *c) {
     if (m->nparams < 1 || !m->pnames[0]) continue;
     LocalVar *p = scope_local(m, m->pnames[0]);
     if (!p || p->rbs_seeded) continue;
-    TyKind merged = ty_unify(p->type, a0);
+    /* Every operation reaches the class through the boxed hook now, which
+       hands the second pair element over as an sp_RbVal -- and which VALUE
+       that is depends on the idiom: `[Klass.new(v), self]` makes it the
+       object, `[Klass.new, v]` makes it the NUMBER. Narrowing the parameter
+       to the object's class guards the dispatch arm on that class, so the
+       second idiom's arm falls through and `5 + obj` raises NoMethodError on
+       a `+` the class defines (found by matz reviewing #4265). The parameter
+       has to be poly. */
+    TyKind merged = ty_unify(p->type, TY_POLY);
     if (merged != p->type) { p->type = merged; changed = 1; }
   }
   return changed;

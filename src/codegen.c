@@ -7137,7 +7137,13 @@ static void emit_user_binop_dispatch(Compiler *c, Buf *b) {
           TyKind cpt = (cp2 && cp2->type != TY_UNKNOWN) ? cp2->type : TY_POLY;
           const char *ccn = c->classes[cmp_defcls].c_name;
           int cvt = c->classes[cmp_defcls].is_value_type;
-          if (ty_is_object(cpt) || cpt == TY_POLY) {
+          /* the arm compares the spaceship's answer with 0, so that answer has
+             to BE a number -- an int, or a float as emit_obj_cmp_dispatch
+             already allows. A `<=>` that can return nil is typed poly (or has
+             no value at all), and `sp_X_cmp(...) == 0` on it is ill-typed C
+             -- reachable as soon as the class also defines #coerce. */
+          int cmp_ret_ok = (cm2->ret == TY_INT || cm2->ret == TY_FLOAT);
+          if (cmp_ret_ok && (ty_is_object(cpt) || cpt == TY_POLY)) {
             char cargs[160];
             const char *cguard = NULL;
             static char cgb[64];
@@ -7161,21 +7167,6 @@ static void emit_user_binop_dispatch(Compiler *c, Buf *b) {
     buf_puts(b, "      break;\n    }\n");
   }
   buf_puts(b, "    default: break;\n  }\n  return sp_box_nil();\n}\n");
-}
-
-/* 1 if class k defines a #coerce this TU emits and can call from the runtime
-   hook: one parameter, no rest, a poly-array return (the [other, self] pair).
-   The coerce protocol needs it for `5 + obj` where obj only reads poly. */
-static int class_coerce_emittable(Compiler *c, int k) {
-  int defcls = -1;
-  int mi = comp_method_in_chain(c, k, "coerce", &defcls);
-  if (mi < 0) return 0;
-  Scope *m = &c->scopes[mi];
-  if (!m->reachable || m->yields || scope_is_shadowed(c, mi) || m->is_transplanted_source)
-    return 0;
-  if (m->nparams != 1 || m->rest_idx >= 0) return 0;
-  if (m->ret != TY_POLY_ARRAY) return 0;
-  return 1;
 }
 
 /* Generate sp_user_to_io_dispatch: the cls_id switch behind IO.select's
@@ -7229,12 +7220,31 @@ static void emit_user_coerce_dispatch(Compiler *c, Buf *b) {
     else if (pt == TY_FLOAT) arg = "sp_poly_to_f(recv)";
     else continue;
     const char *dcn = c->classes[defcls].c_name;
-    buf_printf(b, "    case %d: _pr = sp_%s_coerce(%s(sp_%s *)obj.v.p, %s); break;\n",
-               comp_class_index(c, c->classes[k].name), dcn,
-               c->classes[defcls].is_value_type ? "*" : "", dcn, arg);
+    /* a #coerce that answers a homogeneously-typed pair -- `[9.0, v.to_f]` is
+       a Float array -- is just as valid as a poly one, and rejecting it left
+       the operation lowered against the object's address. Convert it. */
+    Scope *cm = &c->scopes[mi];
+    int cidx = comp_class_index(c, c->classes[k].name);
+    if (cm->ret == TY_POLY_ARRAY) {
+      buf_printf(b, "    case %d: _pr = sp_%s_coerce(%s(sp_%s *)obj.v.p, %s); break;\n",
+                 cidx, dcn, c->classes[defcls].is_value_type ? "*" : "", dcn, arg);
+    }
+    else {
+      Buf callb = {0}, boxb = {0};
+      buf_printf(&callb, "sp_%s_coerce(%s(sp_%s *)obj.v.p, %s)",
+                 dcn, c->classes[defcls].is_value_type ? "*" : "", dcn, arg);
+      emit_boxed_text(c, cm->ret, callb.p, &boxb);
+      buf_printf(b, "    case %d: _pr = sp_poly_to_poly_array(%s); break;\n",
+                 cidx, boxb.p ? boxb.p : "sp_box_nil()");
+      free(callb.p); free(boxb.p);
+    }
   }
   buf_puts(b, "    default: break;\n  }\n");
-  buf_puts(b, "  if (!_pr || _pr->len < 2) return sp_box_nil();\n");
+  /* a #coerce that answered something, but not a pair, is CRuby's TypeError --
+     distinct from a class with no usable #coerce at all, which leaves the hook
+     unhandled so the caller's own error stands. */
+  buf_puts(b, "  if (_pr && _pr->len != 2) sp_raise_cls(\"TypeError\", \"coerce must return [x, y]\");\n");
+  buf_puts(b, "  if (!_pr) return sp_box_nil();\n");
   buf_puts(b, "  SP_GC_ROOT(_pr);\n");
   /* The pair's own operator finishes the job: for the usual [Klass(other),
      self] that is the class's own method, reached through the binop hook. */
@@ -9934,10 +9944,19 @@ char *codegen_program(const NodeTable *nt) {
   {
     static const char *const uops[] = {
       "+", "-", "*", "/", "%", "**", "<<", ">>", "&", "|", "^", NULL };
+    /* A class that defines a #coerce needs the table for its COMPARISONS too:
+       the protocol routes `5 < obj` to the boxed entry, which reaches the
+       class through this hook. Only for such a class, though -- an ordinary
+       Comparable defines <=> and no coerce, is never reached this way, and
+       would only gain a dispatch table it has no use for. */
+    static const char *const cops[] = { "<", ">", "<=", ">=", "<=>", NULL };
     for (int k = 0; k < c->nclasses && !g_has_user_binop; k++) {
       if (!c->classes[k].instantiated) continue;
       for (int u = 0; uops[u]; u++)
         if (comp_method_in_chain(c, k, uops[u], NULL) >= 0) { g_has_user_binop = 1; break; }
+      if (g_has_user_binop || !class_has_coerce_shape(c, k)) continue;
+      for (int u = 0; cops[u]; u++)
+        if (comp_method_in_chain(c, k, cops[u], NULL) >= 0) { g_has_user_binop = 1; break; }
     }
   }
   g_has_user_coerce = 0;

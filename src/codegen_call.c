@@ -14038,6 +14038,151 @@ static int cls_arm_takes_argc(Scope *s, int argc) {
   return argc >= s->nrequired && argc <= s->nparams;
 }
 
+/* 1 if this operand is a user object whose class defines a #coerce with a
+   usable SHAPE (one parameter, no rest). Deliberately not class_coerce_emittable:
+   that asks whether the coerce dispatch will carry an arm for the class, which
+   depends on reachability -- and reachability is computed long after the type
+   fixpoint that has to answer this same question. Asking the shape keeps the
+   typing rule and this emission in step at every point in the pipeline; a class
+   whose #coerce turns out to have no arm simply finds the hook unhandled and
+   gets the ordinary TypeError, which is what CRuby raises for it too. */
+static int coercing_object_arg(Compiler *c, int node) {
+  TyKind t = comp_ntype(c, node);
+  if (!ty_is_object(t)) return 0;
+  return class_has_coerce_shape(c, ty_object_class(t));
+}
+
+/* The boxed runtime entry for each operation the coerce protocol routes, and
+   the C type it answers. Going through these rather than calling #coerce here
+   is what keeps the emission independent of the operand's static class: the
+   dispatch behind them switches on cls_id, so it casts a subclass correctly,
+   ignores a nil operand, and needs no return-type agreement from the method. */
+static const char *numeric_coerce_fn(const char *op, TyKind *answers) {
+  *answers = TY_POLY;
+  if (sp_streq(op, "+")) return "sp_poly_add";
+  if (sp_streq(op, "-")) return "sp_poly_sub";
+  if (sp_streq(op, "*")) return "sp_poly_mul";
+  if (sp_streq(op, "/")) return "sp_poly_div";
+  if (sp_streq(op, "%") || sp_streq(op, "modulo")) return "sp_poly_mod";
+  if (sp_streq(op, "**")) return "sp_poly_pow";
+  if (sp_streq(op, "div")) return "sp_poly_div_m";
+  if (sp_streq(op, "remainder")) return "sp_poly_remainder";
+  if (sp_streq(op, "quo")) return "sp_poly_quo";
+  if (sp_streq(op, "divmod")) return "sp_poly_divmod";
+  *answers = TY_BOOL;
+  if (sp_streq(op, "<")) return "sp_poly_lt";
+  if (sp_streq(op, ">")) return "sp_poly_gt";
+  if (sp_streq(op, "<=")) return "sp_poly_le";
+  if (sp_streq(op, ">=")) return "sp_poly_ge";
+  *answers = TY_INT;
+  if (sp_streq(op, "<=>")) return "sp_poly_spaceship";
+  *answers = TY_FLOAT;
+  if (sp_streq(op, "fdiv")) return "sp_poly_fdiv";
+  return NULL;
+}
+
+/* `recv <op> arg` where recv is a builtin numeric and arg is a user object
+   defining #coerce: Ruby asks the object for the pair `a, b = arg.coerce(recv)`
+   and answers `a.<op>(b)`.
+
+   This runs ahead of the per-method numeric branches because the protocol is
+   ONE rule for all of them, while each of those branches would otherwise apply
+   its own lowering to an object POINTER. Only the six arithmetic operators
+   consulted coerce at a typed call site at all, so everything else reached a
+   branch that treated the pointer as a number: `5 < obj` became a C ordered
+   comparison against the object's ADDRESS -- a silent answer that tracks the
+   allocator and inverts as soon as coerce's pair disagrees with it -- while
+   `5.0 + obj` became ill-typed C.
+
+   All this emission does is refuse to lower the operation against a pointer,
+   and hand both sides to the boxed entry instead. The protocol itself lives in
+   the runtime, where the hook already dispatches on cls_id; nothing here needs
+   to know the operand's class, which is what keeps an inherited #coerce, a nil
+   operand and a #coerce whose pair is not a poly array from each needing a
+   special case of their own. */
+static int emit_numeric_coerce_call(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  const char *name = nt_str(nt, id, "name");
+  int recv = nt_ref(nt, id, "receiver");
+  int argc;
+  const int *argv = call_args(nt, id, &argc);
+  if (recv < 0 || !name || nt_ref(nt, id, "block") >= 0) return 0;
+  TyKind rt = comp_ntype(c, recv);
+  if (rt != TY_INT && rt != TY_FLOAT && rt != TY_RATIONAL && rt != TY_BIGINT) return 0;
+
+  /* Comparable#between? is `(self <=> min) >= 0 && (self <=> max) <= 0` -- the
+     spaceship and nothing else, which is why a class that defines `>=` and `<=`
+     but no `<=>` gets CRuby's "comparison failed" rather than an answer. The
+     numeric branches lowered it against each bound's ADDRESS, the same silent
+     answer the operators gave one method over. The receiver is bound to a temp
+     because it is compared twice, and rooted because both bounds are evaluated
+     after it and each may allocate: a Rational or Bignum box carries a heap
+     pointer that has to survive them. */
+  if (argc == 2 && sp_streq(name, "between?") &&
+      (coercing_object_arg(c, argv[0]) || coercing_object_arg(c, argv[1]))) {
+    int tr = ++g_tmp, tl = ++g_tmp, th = ++g_tmp;
+    buf_printf(b, "({ sp_RbVal _t%d = ", tr);
+    emit_boxed(c, recv, b);
+    /* The bounds are spilled and rooted like the binary path's operand: each
+       is read again deep inside its own #coerce, and the second bound must
+       survive the first comparison's allocations. Ruby, too, evaluates both
+       bound expressions before the first <=> runs. */
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = ", tr, tl);
+    emit_boxed(c, argv[0], b);
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = ", tl, th);
+    emit_boxed(c, argv[1], b);
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d);"
+                  " sp_poly_cmp_ge0(_t%d, _t%d) && sp_poly_cmp_le0(_t%d, _t%d); })",
+               th, tr, tl, tr, th);
+    return 1;
+  }
+
+  if (argc != 1) return 0;
+  if (!coercing_object_arg(c, argv[0])) return 0;
+  TyKind answers;
+  const char *fn = numeric_coerce_fn(name, &answers);
+  if (!fn) return 0;
+
+  int tr = ++g_tmp, to = ++g_tmp;
+  TyKind res = comp_ntype(c, id);
+  /* Both sides are spilled into rooted temps, and the receiver first -- which
+     is Ruby's own order.
+
+     The receiver has to be rooted because the operand is commonly a fresh
+     allocation: emitting the two as bare arguments to one call left the
+     receiver's box, which for a Rational or Bignum carries a heap pointer,
+     unrooted while that allocation ran.
+
+     The operand has to be rooted because the protocol reads it again deep
+     inside the call. The generated #coerce roots its parameter but not its
+     SELF, and the idiomatic body allocates -- `[Klass.new(v), self]` builds an
+     object and an array before `self` is read. With the operand unrooted the
+     collector took it there and the pool handed the block to the object the
+     method had just built, so `self` became a different live object and the
+     operation answered a plausible wrong number. */
+  buf_printf(b, "({ sp_RbVal _t%d = ", tr);
+  emit_boxed(c, recv, b);
+  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = ", tr, to);
+  emit_boxed(c, argv[0], b);
+  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", to);
+  Buf call = {0};
+  buf_printf(&call, "%s(_t%d, _t%d)", fn, tr, to);
+  /* box the entry's own answer, then let the slot take it back in its type --
+     `<=>` answers an int sentinel for nil, so the nilable form is the one that
+     lands a nil on the slot's own nil rather than under the payload. */
+  if (res == TY_POLY || res == TY_UNKNOWN) emit_boxed_text(c, answers, call.p, b);
+  else if (answers == res) buf_puts(b, call.p);
+  else {
+    Buf boxed = {0};
+    emit_boxed_text(c, answers, call.p, &boxed);
+    emit_unbox_nilable_text(c, res, boxed.p, b);
+    free(boxed.p);
+  }
+  free(call.p);
+  buf_puts(b, "; })");
+  return 1;
+}
+
 static void emit_call_body(Compiler *c, int id, Buf *b) {
   /* deep-return pickup (#3227 P6): a marked receiverless call to a method
      whose every return path yields a shared handle -- reset the side
@@ -14821,6 +14966,8 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     buf_puts(b, ")).v.p))");
     return;
   }
+
+  if (emit_numeric_coerce_call(c, id, b)) return;
 
   if (emit_complex_rational_call(c, id, b)) return;
 
@@ -26569,6 +26716,18 @@ else {
         buf_puts(b, "))), FALSE)");
         return;
       }
+      /* the same failure for a user object, which CRuby names by its class
+         (sp_cmperr_desc makes that distinction). Lowered as a byte compare,
+         the object's pointer went to sp_str_cmp_bytes and the build failed
+         -- or, before that, compared as bytes (found by matz reviewing #4265) */
+      if (ty_is_object(sat)) {
+        buf_puts(b, "((void)("); emit_expr(c, recv, b);
+        buf_puts(b, "), sp_raise_cls(\"ArgumentError\", sp_sprintf("
+                    "\"comparison of String with %s failed\", sp_cmperr_desc(");
+        emit_boxed(c, argv[0], b);
+        buf_puts(b, "))), FALSE)");
+        return;
+      }
       buf_puts(b, "(sp_str_cmp_bytes(");
       emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b);
       buf_printf(b, ") %s 0)", name);
@@ -26957,6 +27116,23 @@ else {
 
   /* between?(lo, hi): lo <= self <= hi */
   if (sp_streq(name, "between?") && argc == 2) {
+    if (rt == TY_STRING &&
+        (ty_is_object(comp_ntype(c, argv[0])) || ty_is_object(comp_ntype(c, argv[1])))) {
+      /* Comparable#between? is two <=>s, and String#<=> against an object
+         that answers neither <=> nor to_str is nil: CRuby's "comparison
+         failed", named after the first bad bound. Both bounds are still
+         evaluated, once each, in order -- Ruby evaluates the arguments before
+         between? runs -- so each is spilled to a temp first. */
+      int t0 = ++g_tmp, t1 = ++g_tmp;
+      int bad = ty_is_object(comp_ntype(c, argv[0])) ? t0 : t1;
+      buf_puts(b, "({ (void)("); emit_expr(c, recv, b);
+      buf_printf(b, "); sp_RbVal _t%d = ", t0); emit_boxed(c, argv[0], b);
+      buf_printf(b, "; sp_RbVal _t%d = ", t1); emit_boxed(c, argv[1], b);
+      buf_printf(b, "; (void)_t%d; (void)_t%d; sp_raise_cls(\"ArgumentError\", sp_sprintf("
+                    "\"comparison of String with %%s failed\", sp_cmperr_desc(_t%d))); FALSE; })",
+                 t0, t1, bad);
+      return;
+    }
     if (rt == TY_STRING) {
       int tv = ++g_tmp;
       buf_printf(b, "({ const char *_t%d = ", tv); emit_expr(c, recv, b);
