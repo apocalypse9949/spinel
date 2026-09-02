@@ -7527,10 +7527,16 @@ else {
         }
         /* The operator method can `return nil` (a NULL reference); box a
            reference-type result via sp_box_nullable_obj so NULL becomes nil, not
-           a truthy wrapper. A value-type class is never NULL, so keep sp_box_obj. */
-        const char *pbox = c->classes[poly_defcls].is_value_type
-                             ? "sp_box_obj(" : "sp_box_nullable_obj((void *)(";
-        const char *pboxc = c->classes[poly_defcls].is_value_type ? ", %d)" : "), %d)";
+           a truthy wrapper. A value-type class is never NULL, and its operator
+           answers a STRUCT: sp_box_vobj_<C> is the boxer that takes one and
+           heap-copies it, the same one every other value-type arm uses. The
+           by-value/by-pointer pair below moves with it (#4278). */
+        int pval = c->classes[poly_defcls].is_value_type;
+        char pboxbuf[160];
+        if (pval)
+          snprintf(pboxbuf, sizeof pboxbuf, "sp_box_vobj_%s(", c->classes[poly_defcls].c_name);
+        const char *pbox = pval ? pboxbuf : "sp_box_nullable_obj((void *)(";
+        const char *pboxc = pval ? ")" : "), %d)";
         /* The slot is POLY: the user operator is only the right answer when the
            value really is an instance of that class. An Integer in the same
            slot takes the numeric path, as it does everywhere else a poly
@@ -7541,10 +7547,16 @@ else {
         if (pnum) buf_printf(b, "%s = ((%s).tag == SP_TAG_OBJ && (%s).cls_id == %d) ? ",
                              ref, ref, ref, poly_defcls);
         else buf_printf(b, "%s = ", ref);
-        buf_printf(b, "%ssp_%s_%s((sp_%s *)(%s).v.p, _t%d)", pbox,
+        /* A value-type class takes `self` BY VALUE, so the boxed payload has
+           to be dereferenced -- `*(sp_X *)v.p`, the same unboxing the poly
+           dispatch arms make. Passing the pointer straight in did not compile
+           (#4278, the op-assign twin of #4091). */
+        buf_printf(b, "%ssp_%s_%s(%s(sp_%s *)(%s).v.p, _t%d)", pbox,
                    c->classes[poly_defcls].c_name, mc(pms->name),
+                   pval ? "*" : "",
                    c->classes[poly_defcls].c_name, ref, iatmp);
-        buf_printf(b, pboxc, poly_defcls);
+        if (pval) buf_puts(b, pboxc);
+        else buf_printf(b, pboxc, poly_defcls);
         if (pnum) {
           /* the OTHER runtime kind folds the SAME evaluated value: re-emitting
              the RHS ran its side effects twice (#4204) */
