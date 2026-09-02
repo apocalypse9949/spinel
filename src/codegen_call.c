@@ -4244,7 +4244,10 @@ static int emit_poly_builtin_method(Compiler *c, int id, Buf *b) {
   if ((sp_streq(name, "start_with?") || sp_streq(name, "end_with?")) && argc >= 1 && argv) {
     const char *fn = sp_streq(name, "start_with?") ? "sp_str_start_with" : "sp_str_end_with";
     int tv = ++g_tmp;
-    buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
+    /* a shared-string handle is a String: deref it into the immediate form the
+       arm reads, or the guard is single-armed and raises for it (#4279) */
+    buf_printf(b, "({ sp_RbVal _t%d = sp_poly_strbuf_deref(", tv); emit_expr(c, recv, b);
+    buf_puts(b, ")");
     buf_printf(b, "; _t%d.tag == SP_TAG_STR ? (", tv);
     for (int j = 0; j < argc; j++) {
       if (j) buf_puts(b, " || ");
@@ -5611,9 +5614,14 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       }
       /* include? on a TAG_STR receiver: check tag before entering cls_id switch.
          Boxed when a user arm widened the dispatch result to poly (#4072). */
+      /* A shared-string handle is a String too. The receiver temp is NOT
+         dereferenced at the spill -- the mutating arms sharing it need the
+         handle -- so this arm widens its own guard and reads the bytes with
+         sp_poly_recv_s. Without it a heap String fell through to the cls_id
+         switch and answered false, silently (#4279). */
       if (is_include && infer_type(c, argv[0]) == TY_STRING)
-        buf_printf(b, "if (_t%d.tag == SP_TAG_STR) { _t%d = %ssp_str_include(_t%d.v.s, _t%d)%s; }\nelse ",
-                   tv, tr, ret == TY_POLY ? "sp_box_bool(" : "", tv, atmp[0],
+        buf_printf(b, "if (_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d)) { _t%d = %ssp_str_include(sp_poly_recv_s(_t%d, \"include?\"), _t%d)%s; }\nelse ",
+                   tv, tv, tr, ret == TY_POLY ? "sp_box_bool(" : "", tv, atmp[0],
                    ret == TY_POLY ? ")" : "");
       /* delete(chars) on a TAG_STR receiver: String#delete, boxed when the
          dispatch result stays poly. */
@@ -25052,7 +25060,9 @@ else {
        false the way `nil !~` answers true. */
     if (are >= 0 && sp_streq(name, "match?") && rt == TY_POLY) {
       int tv = ++g_tmp;
-      buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
+      /* a shared-string handle is a String (#4279) */
+      buf_printf(b, "({ sp_RbVal _t%d = sp_poly_strbuf_deref(", tv); emit_expr(c, recv, b);
+      buf_puts(b, ")");
       buf_printf(b, "; (sp_bool)(_t%d.tag == SP_TAG_STR ? ", tv);
       if (argc == 1) buf_printf(b, "sp_re_match_p(sp_re_pat_%d, _t%d.v.s)", are, tv);
       else {

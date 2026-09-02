@@ -2711,6 +2711,8 @@ static sp_RbVal sp_poly_succ_m(sp_RbVal v, sp_bool allow_enum) {
   if (v.tag == SP_TAG_BIGINT) return sp_box_bigint(sp_bigint_add((sp_Bigint *)v.v.p,
                                                                  sp_bigint_new_int(1)));
   if (v.tag == SP_TAG_STR) return sp_box_str(sp_str_succ(v.v.s));
+  /* a shared-string handle succeeds as its live value (#4279) */
+  if (sp_poly_is_strbuf(v)) return sp_box_str(sp_str_succ(sp_poly_to_s(v)));
   if (v.tag == SP_TAG_SYM && sp_sym_name_fn && sp_json_sym_intern_fn)
     return sp_box_sym(sp_json_sym_intern_fn(sp_str_succ(sp_sym_name_fn((sp_sym)v.v.i))));
   if (allow_enum && v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_ENUMERATOR && v.v.p)
@@ -4013,6 +4015,10 @@ static sp_PolyArray *sp_PolyArray_slice_range(sp_PolyArray *a, sp_int start, sp_
 /* 2-arg slice on a poly receiver: dispatch to the typed slice functions. */
 static sp_RbVal sp_poly_slice(sp_RbVal a, sp_int start, sp_int len) {
   if (a.tag == SP_TAG_STR) return sp_box_nullable_str(sp_str_sub_range(a.v.s ? a.v.s : "", start, len));
+  /* A shared-string handle is a String: slicing is non-mutating, so it answers
+     as its live value rather than falling through to the array kinds and out
+     the nil default, which is what `s = +""; s << "abc"; s[0, 2]` did (#4279). */
+  if (sp_poly_is_strbuf(a)) return sp_poly_slice(sp_poly_strbuf_deref(a), start, len);
   if (a.tag != SP_TAG_OBJ) return sp_box_nil();
   /* arr[start, negative] is nil in CRuby (the slice helpers would return []) */
   if (len < 0 && sp_poly_is_array_kind(a.cls_id)) return sp_box_nil();
@@ -5618,6 +5624,11 @@ static sp_int sp_rbval_hash_key(sp_RbVal v) {
     case SP_TAG_FLT: { double f = v.v.f == 0.0 ? 0.0 : v.v.f;
                        uint64_t b; memcpy(&b, &f, sizeof(b)); return (sp_int)b; }
     case SP_TAG_OBJ:
+      /* A shared-string handle is `==` to the immediate string with the same
+         bytes, so it has to hash alike or a Hash keyed by one misses the
+         other -- the same rule as the array kinds just below (#4279). */
+      if (sp_poly_is_strbuf(v)) { const char *hs = sp_poly_to_s(v);
+                                  return hs ? (sp_int)sp_str_hash(hs) : 0; }
       /* Arrays hash by value across storage kinds: an IntArray [0, 0] and a
          PolyArray [0, 0] (e.g. one built by Array#product) are `==` and must
          hash alike to collide in a Hash, so hash each element through
@@ -6172,6 +6183,14 @@ static sp_RbVal sp_poly_shift(sp_RbVal v) {
   return sp_box_nil();
 }
 static sp_RbVal sp_poly_get_str(sp_RbVal v, const char *key) {
+  /* `s["sub"]` is String#[str]: the substring itself when present, else nil.
+     Both string representations answer it, and neither did here -- an
+     immediate string was rejected by the tag test on the next line and a
+     shared handle fell out of the switch below (#4279). */
+  if (v.tag == SP_TAG_STR || sp_poly_is_strbuf(v)) {
+    const char *s = v.tag == SP_TAG_STR ? (v.v.s ? v.v.s : sp_str_empty) : sp_poly_to_s(v);
+    return (key && sp_str_include(s, key)) ? sp_box_str(key) : sp_box_nil();
+  }
   if (v.tag != SP_TAG_OBJ) return sp_box_nil();
   switch (v.cls_id) {
     case SP_BUILTIN_CURRY: return sp_curry_call_poly((sp_Curry *)v.v.p, 1, (sp_RbVal[]){sp_box_str(key)});
@@ -6457,6 +6476,10 @@ static SP_NOINLINE sp_RbVal sp_poly_arr_get_hash_cold(sp_RbVal a, sp_int i) {
     }
   }
   if (a.tag == SP_TAG_INT) return sp_box_int((a.v.i >> i) & 1);
+  /* ...and a shared-string handle is a String, so it takes the same arm: it
+     is a non-mutating read, and without this it fell past the arm below and
+     returned nil exactly as that comment describes (#4279). */
+  if (sp_poly_is_strbuf(a)) return sp_poly_arr_get_hash_cold(sp_poly_strbuf_deref(a), i);
   /* String#[int]: return the single character at i (a 1-char string), or nil
      when out of range. A String that widened to poly (e.g. a method with
      multiple return paths) reaches this generic index path; without this arm
@@ -6549,6 +6572,10 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
      here, before the key-typed dispatch below coerces it to an index */
   if (recv.tag == SP_TAG_OBJ && recv.cls_id == SP_BUILTIN_CURRY)
     return sp_curry_call_poly((sp_Curry *)recv.v.p, 1, &idx);
+  /* Reading through a shared-string handle is non-mutating, so it answers as
+     its live value: the String arms below all test SP_TAG_STR, and a handle
+     fell past every one of them to the trailing nil (#4279). */
+  if (sp_poly_is_strbuf(recv)) return sp_poly_index_poly(sp_poly_strbuf_deref(recv), idx);
   /* an Integer index into an array is the common read, and it matches nothing
      below until the very last line (array kinds are builtin, so the Struct arm
      with its cls_id >= 0 test cannot claim it) */

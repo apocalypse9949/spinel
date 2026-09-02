@@ -1157,7 +1157,13 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
   if (recv >= 0 && rt == TY_POLY && sp_streq(name, "split") &&
       (argc == 0 || argc == 1 || argc == 2) && nt_ref(nt, id, "block") < 0) {
     int tv = ++g_tmp;
-    buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
+    /* A shared-string handle (`s = +""; s << "a;b"`) is a String, and every
+       arm below reads `.v.s`, so the handle is dereferenced into the
+       immediate form first -- the same retry sp_poly_add makes. Without it
+       the guard was single-armed and a heap String raised NoMethodError
+       naming String, for a method String has (#4279). */
+    buf_printf(b, "({ sp_RbVal _t%d = sp_poly_strbuf_deref(", tv); emit_expr(c, recv, b);
+    buf_puts(b, ")");
     buf_printf(b, "; _t%d.tag == SP_TAG_STR ? ", tv);
     if (argc == 0) buf_printf(b, "sp_str_split_ws(_t%d.v.s)", tv);
     else if (argc == 1) {
@@ -12321,7 +12327,10 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
         /* Root the boxed receiver: sp_sym_intern reads through the String's
            data pointer and allocates, so a GC mid-intern could otherwise free
            an unrooted temporary String out from under it. */
-        buf_printf(b, "({ sp_RbVal _t%d = ", t); emit_expr(c, recv, b);
+        /* a shared-string handle is a String: deref it into the immediate
+           form the arm reads, or to_sym raised for it (#4279) */
+        buf_printf(b, "({ sp_RbVal _t%d = sp_poly_strbuf_deref(", t); emit_expr(c, recv, b);
+        buf_puts(b, ")");
         buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); _t%d.tag == SP_TAG_STR ? sp_sym_intern_n(_t%d.v.s, sp_str_byte_len(_t%d.v.s))"
                       " : (_t%d.tag == SP_TAG_SYM ? (sp_sym)_t%d.v.i"
                       " : (sp_raise_poly_nomethod(\"to_sym\", _t%d), (sp_sym)0)); })",
