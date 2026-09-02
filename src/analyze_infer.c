@@ -5080,6 +5080,13 @@ else {
     if ((sp_streq(name, "casecmp") || sp_streq(name, "casecmp?")) && argc == 1) {
       TyKind at0 = infer_type(c, argv[0]);
       if (at0 == TY_POLY) return TY_POLY;  /* runtime tag decides: boxed result or nil */
+      /* an operand that answers #to_str is converted and compared
+         (rb_check_string_type). The call is typed POLY, not the Integer or
+         boolean a String operand gives, because the conversion can still
+         answer nothing: a #to_str answering nil is CRuby's nil casecmp. The
+         emitter takes the same shape test, so both agree. */
+      if (ty_is_object(at0) && class_has_to_str_shape(c, ty_object_class(at0)))
+        return TY_POLY;
       if (at0 != TY_STRING && at0 != TY_UNKNOWN) return TY_NIL;
       return sp_streq(name, "casecmp") ? TY_INT : TY_BOOL;
     }

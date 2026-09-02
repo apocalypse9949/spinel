@@ -1530,6 +1530,13 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     if (argc == 1 && (sp_streq(name, "casecmp") || sp_streq(name, "casecmp?"))) {
       TyKind at0 = argv ? infer_type(c, argv[0]) : TY_UNKNOWN;
       if (at0 == TY_POLY) { *out = TY_POLY; return 1; }
+      /* an operand that answers #to_str converts and compares, and answers
+         nil when its #to_str does -- the boxed result the emitter's arm
+         gives. Same shape test, same answer, as the typed-receiver rule. */
+      if (ty_is_object(at0) && class_has_to_str_shape(c, ty_object_class(at0))) {
+        *out = TY_POLY;
+        return 1;
+      }
       if (at0 != TY_STRING && at0 != TY_UNKNOWN) { *out = TY_NIL; return 1; }
       *out = sp_streq(name, "casecmp") ? TY_INT : TY_BOOL;
       return 1;

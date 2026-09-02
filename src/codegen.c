@@ -736,6 +736,91 @@ void emit_path_expr(Compiler *c, int node, Buf *b) {
   emit_str_expr(c, node, b);
 }
 
+/* The operand of a String COMPARISON -- #<=>, #casecmp, #casecmp?, and the
+   ordered operators and #between? Comparable builds on #<=>. CRuby asks a
+   non-String operand for #to_str (rb_check_string_type) and compares the
+   strings. Unlike the String argument slot above, a class that answers
+   nothing is not an error here: it is the comparison's own nil, or its
+   "comparison of String with X failed".
+
+   1 iff the operand is a user object whose class answers a #to_str this rule
+   converts through. The type rules ask the same predicate of the same class
+   (analyze_util.c), so typing and emission agree on the typed side. */
+int str_cmp_conv_shape(Compiler *c, int node) {
+  TyKind t = comp_ntype(c, node);
+  return ty_is_object(t) && class_has_to_str_shape(c, ty_object_class(t));
+}
+
+/* The conversion itself, reading the operand back out of the rooted sp_RbVal
+   temp the prologue below spilled it into rather than re-emitting the operand
+   expression: the object is otherwise reachable from nothing but the argument
+   being converted, and its own #to_str allocates before it reads self.
+
+   NULL means "no conversion", which each arm turns into its own refusal.
+   Four shapes answer it: a class with no usable #to_str (the literal NULL --
+   the arm is then the refusal, and the C compiler folds the compare away), a
+   #to_str typed String that answers the nil String, a #to_str typed poly that
+   answers nil, and a BOXED value that is neither a String nor an object the
+   conversion bridge carries. A poly answer that is neither nil nor a String
+   is CRuby's TypeError, which sp_str_cmp_conv raises.
+
+   A boxed operand asks the runtime's own rb_check_string_type, the same
+   sp_poly_check_str the boxed comparison and the poly casecmp arm ask, so a
+   poly slot holding a String compares and one holding an object converts
+   (rooted inside sp_poly_check_str_obj) rather than both being refused for
+   want of a static type. Only #between? reaches this with a boxed bound: the
+   other arms are entered on a statically OBJECT operand, and a boxed one goes
+   to sp_poly_lt / sp_poly_spaceship / the poly casecmp arm long before here.
+
+   The tag test on the object shapes keeps the direct call off a NULL self: an
+   object-typed slot a method left nil boxes as nil rather than as SP_TAG_OBJ,
+   and the refusal then names it "nil", which is CRuby's answer. The object is
+   a pointer, never the by-value layout: a class with an object-typed instance
+   in a call ARGUMENT -- which every one of these operands is -- is
+   disqualified from that layout (detect_value_types). */
+void emit_str_cmp_conv(Compiler *c, int node, int tmp, Buf *b) {
+  TyKind t = comp_ntype(c, node);
+  if (t == TY_POLY) { buf_printf(b, "sp_poly_check_str(_t%d)", tmp); return; }
+  if (!str_cmp_conv_shape(c, node)) { buf_puts(b, "NULL"); return; }
+  int def = -1;
+  int poly = obj_conv_method(c, t, "to_str", TY_STRING, &def) < 0;
+  if (poly) comp_method_in_chain(c, ty_object_class(t), "to_str", &def);
+  buf_printf(b, "(_t%d.tag == SP_TAG_OBJ ? ", tmp);
+  if (poly) buf_puts(b, "sp_str_cmp_conv(");
+  buf_printf(b, "sp_%s_to_str((sp_%s *)_t%d.v.p)",
+             c->classes[def].c_name, c->classes[def].c_name, tmp);
+  if (poly) buf_printf(b, ", _t%d)", tmp);
+  buf_puts(b, " : NULL)");
+}
+
+/* The prologue every String-comparison arm shares. It opens a statement
+   expression and emits, in Ruby's own evaluation order:
+
+     ({ const char *_tr = <recv>;   SP_GC_ROOT_STR(_tr);
+        sp_RbVal    _to = <operand>; SP_GC_ROOT_RBVAL(_to);
+        const char *_ts = <conversion, or NULL>; _ts ?
+
+   -- receiver, then operand, then #to_str, once each. Both spills are
+   load-bearing: #to_str allocates, so the receiver has to survive it (a
+   comparison's receiver is often a fresh string held in nothing else -- an
+   interpolation, a `+`), and so does the operand OBJECT, which reads self
+   after allocating. The conversion is deliberately NOT put in the call's
+   conversion hold: the hold would hoist it in front of the receiver, and
+   #between? needs it left where the compare that reads it is.
+
+   The caller closes with `<compare> : <fallback>; })`. Nothing may allocate
+   between the two -- the converted string is live only in _ts. */
+void emit_str_cmp_prologue(Compiler *c, const char *rtxt, int operand,
+                           int *tr, int *to, int *ts, Buf *b) {
+  *tr = ++g_tmp; *to = ++g_tmp; *ts = ++g_tmp;
+  buf_printf(b, "({ const char *_t%d = %s; SP_GC_ROOT_STR(_t%d); sp_RbVal _t%d = ",
+             *tr, rtxt, *tr, *to);
+  emit_boxed(c, operand, b);
+  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); const char *_t%d = ", *to, *ts);
+  emit_str_cmp_conv(c, operand, *to, b);
+  buf_printf(b, "; _t%d ? ", *ts);
+}
+
 /* A node entering a WRITE payload slot (IO#write, #pwrite, #write_nonblock):
    CRuby writes the operand's #to_s, so a String passes through and anything
    else renders the way puts renders it -- a user object through its own
