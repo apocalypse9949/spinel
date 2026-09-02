@@ -5,12 +5,16 @@ puts Dir.tmpdir.is_a?(String)
 puts !Dir.tmpdir.empty?
 
 # mktmpdir without a block: returns a newly-created directory path.
+date_before = Time.now.strftime("%Y%m%d")
 d = Dir.mktmpdir
 begin
   puts d.is_a?(String)
   puts Dir.exist?(d)
-  # Path includes date and pid.
-  puts d.include?(Time.now.strftime("%Y%m%d"))
+  # Path includes date and pid. The date token is captured before
+  # creation; if the test crosses midnight, the after-date is the
+  # valid alternative.
+  date_after = Time.now.strftime("%Y%m%d")
+  puts d.include?(date_before) || d.include?(date_after)
   puts d.include?(Process.pid.to_s)
 ensure
   Dir.rmdir(d) if d && Dir.exist?(d)
@@ -35,13 +39,15 @@ ensure
 end
 
 # mktmpdir with a block: yields the path, cleans up after.
+yielded_path = nil
 result = Dir.mktmpdir do |path|
+  yielded_path = path
   puts path.is_a?(String)
   puts Dir.exist?(path)
   :done
 end
 puts result == :done
-puts !Dir.exist?(Dir.tmpdir + "/d" + Time.now.strftime("%Y%m%d"))  # cleanup happened
+puts !Dir.exist?(yielded_path)  # cleanup happened
 
 # mktmpdir with parent_dir argument.
 parent = Dir.mktmpdir

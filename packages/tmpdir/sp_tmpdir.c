@@ -122,7 +122,17 @@ static const char *tmpdir_mkdtemp(const char *prefix, const char *suffix,
     }
     if (errno != EEXIST) {
       int saved = errno;
-      sp_raise_cls("Errno::ENOENT", strerror(saved));
+      const char *cls = "RuntimeError";
+      switch (saved) {
+        case EACCES:       cls = "Errno::EACCES"; break;
+        case EFAULT:       cls = "Errno::EFAULT"; break;
+        case ELOOP:        cls = "Errno::ELOOP"; break;
+        case ENAMETOOLONG: cls = "Errno::ENAMETOOLONG"; break;
+        case ENOENT:       cls = "Errno::ENOENT"; break;
+        case ENOTDIR:      cls = "Errno::ENOTDIR"; break;
+        case EROFS:        cls = "Errno::EROFS"; break;
+      }
+      sp_raise_cls(cls, strerror(saved));
     }
   }
   sp_raise_cls("Errno::EEXIST", "cannot generate temporary directory name");
