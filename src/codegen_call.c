@@ -14973,8 +14973,45 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
 
   /* loop { break val } as expression: emit pre-statement for-loop, result via break var */
   /* Kernel#caller / caller(start) / caller(start, len) -> the current stack
-     (method-granularity, via sp_caller_now). Bare `caller` is `caller(1)`. */
+     (method-granularity, via sp_caller_now). Bare `caller` is `caller(1)`.
+     Also accepts caller(0..n) / caller(0...n) -- a Range literal with
+     integer endpoints -- and rewrites it to the (start, len) form. */
   if (recv < 0 && sp_streq(name, "caller") && argc <= 2 && !bare_call_class_owned(c, id)) {
+    /* Range literal: caller(lo..hi) or caller(lo...hi) -> caller(lo, len). */
+    if (argc == 1 && nt_type(c->nt, argv[0]) &&
+        sp_streq(nt_type(c->nt, argv[0]), "RangeNode")) {
+      int rid = argv[0];
+      int left = nt_ref(c->nt, rid, "left");
+      int right = nt_ref(c->nt, rid, "right");
+      int excl = (int)(nt_int(c->nt, rid, "flags", 0) & 4) ? 1 : 0;
+      if (left >= 0 && right >= 0 &&
+          comp_ntype(c, left) == TY_INT && comp_ntype(c, right) == TY_INT) {
+        /* Evaluate left and right into temps in source order so a
+           side-effecting endpoint (e.g. caller(foo()..bar())) runs each
+           call exactly once, left before right. */
+        int lt = ++g_tmp, rt = ++g_tmp;
+        Buf lb = expr_buf(c, left);
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "sp_int _t%d = %s;\n", lt, lb.p ? lb.p : "0");
+        free(lb.p);
+        Buf rb = expr_buf(c, right);
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "sp_int _t%d = %s;\n", rt, rb.p ? rb.p : "0");
+        free(rb.p);
+        buf_printf(b, "sp_caller(_t%d, 1, (_t%d - _t%d%s))", lt, rt, lt,
+                   excl ? "" : " + 1");
+        return;
+      }
+      unsupported_feature(c, id,
+        "caller(Range) only supports Range literals with integer endpoints "
+        "(e.g. caller(0..5)); pass start and length instead: caller(start, len)");
+    }
+    /* Non-literal Range argument: compile error instead of a runtime
+       crash with "no implicit conversion of Range into Integer". */
+    if (argc >= 1 && comp_ntype(c, argv[0]) == TY_RANGE)
+      unsupported_feature(c, id,
+        "caller(Range) only supports Range literals with integer endpoints "
+        "(e.g. caller(0..5)); pass start and length instead: caller(start, len)");
     buf_puts(b, "sp_caller(");
     if (argc >= 1) emit_int_expr(c, argv[0], b); else buf_puts(b, "1");
     if (argc == 2) { buf_puts(b, ", 1, "); emit_int_expr(c, argv[1], b); }
