@@ -26611,6 +26611,35 @@ else {
       buf_puts(b, "), SP_INT_NIL)");
       return;
     }
+    /* CRuby's String#<=> asks a non-String operand for #to_str
+       (rb_check_string_type) and compares the strings. There was no arm for
+       an object operand at all, so the call fell through to the object
+       dispatch below and raised NoMethodError naming String#<=> itself.
+
+       Only a CONVERTING class enters here, which is what makes the NULL
+       fallback below mean one thing: a #to_str that answered nil. An operand
+       whose class answers no usable #to_str keeps that NoMethodError. CRuby
+       has an answer for it -- nil, or -(other <=> self) when the class
+       defines #<=> (rb_invcmp) -- but that answer is Object#<=>'s rule, not
+       this conversion, and giving it here would also silence the classes this
+       rule deliberately declines (a #to_str with parameters, one returning an
+       Integer, one that raises), each of which CRuby answers differently
+       again. It goes as its own change. The ordered operators and #between?
+       below DO reach their fallback for a class with no #to_str, because
+       there a failed comparison is CRuby's own answer. */
+    if (lrt == TY_STRING && str_cmp_conv_shape(c, argv[0])) {
+      int tr, to, ts, tc = ++g_tmp;
+      int boxed_out = comp_ntype(c, id) == TY_POLY;
+      Buf rb = expr_buf(c, recv);
+      if (boxed_out) buf_puts(b, "sp_box_int_or_nil(");
+      emit_str_cmp_prologue(c, rb.p ? rb.p : "", argv[0], &tr, &to, &ts, b);
+      buf_printf(b, "({ int _t%d = sp_str_cmp_bytes(_t%d, _t%d);"
+                    " (sp_int)((_t%d > 0) - (_t%d < 0)); }) : SP_INT_NIL; })",
+                 tc, tr, ts, tc, tc);
+      if (boxed_out) buf_puts(b, ")");
+      free(rb.p);
+      return;
+    }
     if (lrt == TY_STRING && lat == TY_STRING) {
       int tc = ++g_tmp;
       buf_printf(b, "({ int _t%d = sp_str_cmp_bytes(", tc); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b);
@@ -26755,16 +26784,25 @@ else {
         buf_puts(b, "))), FALSE)");
         return;
       }
-      /* the same failure for a user object, which CRuby names by its class
-         (sp_cmperr_desc makes that distinction). Lowered as a byte compare,
-         the object's pointer went to sp_str_cmp_bytes and the build failed
-         -- or, before that, compared as bytes (found by matz reviewing #4265) */
+      /* A user object: the <=> these are built on asks it for #to_str first,
+         so one that answers a string compares, and one that answers none is
+         the same failed comparison as above -- which CRuby names by its class
+         rather than its inspect (sp_cmperr_desc makes that distinction).
+         Lowered as a byte compare, the object's pointer went to
+         sp_str_cmp_bytes and the build failed -- or, before that, compared as
+         bytes (found by matz reviewing #4265). Both halves are one arm: the
+         refusal is the conversion answering NULL, so it is raised where the
+         <=> that failed is, not eagerly in front of it. */
       if (ty_is_object(sat)) {
-        buf_puts(b, "((void)("); emit_expr(c, recv, b);
-        buf_puts(b, "), sp_raise_cls(\"ArgumentError\", sp_sprintf("
-                    "\"comparison of String with %s failed\", sp_cmperr_desc(");
-        emit_boxed(c, argv[0], b);
-        buf_puts(b, "))), FALSE)");
+        int tr, to, ts;
+        Buf rb = expr_buf(c, recv);
+        emit_str_cmp_prologue(c, rb.p ? rb.p : "", argv[0], &tr, &to, &ts, b);
+        buf_printf(b, "sp_str_cmp_bytes(_t%d, _t%d) %s 0"
+                      " : (sp_raise_cls(\"ArgumentError\", sp_sprintf("
+                      "\"comparison of String with %%s failed\","
+                      " sp_cmperr_desc(_t%d))), FALSE); })",
+                   tr, ts, name, to);
+        free(rb.p);
         return;
       }
       buf_puts(b, "(sp_str_cmp_bytes(");
@@ -27157,19 +27195,54 @@ else {
   if (sp_streq(name, "between?") && argc == 2) {
     if (rt == TY_STRING &&
         (ty_is_object(comp_ntype(c, argv[0])) || ty_is_object(comp_ntype(c, argv[1])))) {
-      /* Comparable#between? is two <=>s, and String#<=> against an object
-         that answers neither <=> nor to_str is nil: CRuby's "comparison
-         failed", named after the first bad bound. Both bounds are still
-         evaluated, once each, in order -- Ruby evaluates the arguments before
-         between? runs -- so each is spilled to a temp first. */
-      int t0 = ++g_tmp, t1 = ++g_tmp;
-      int bad = ty_is_object(comp_ntype(c, argv[0])) ? t0 : t1;
-      buf_puts(b, "({ (void)("); emit_expr(c, recv, b);
-      buf_printf(b, "); sp_RbVal _t%d = ", t0); emit_boxed(c, argv[0], b);
-      buf_printf(b, "; sp_RbVal _t%d = ", t1); emit_boxed(c, argv[1], b);
-      buf_printf(b, "; (void)_t%d; (void)_t%d; sp_raise_cls(\"ArgumentError\", sp_sprintf("
-                    "\"comparison of String with %%s failed\", sp_cmperr_desc(_t%d))); FALSE; })",
-                 t0, t1, bad);
+      /* Comparable#between? is two <=>s and it STOPS at the first: when
+         `self >= lo` is false CRuby never asks hi for anything, so
+         `"abc".between?(W.new("abd"), Plain.new)` is false rather than the
+         second bound's comparison error. The bounds are still evaluated, once
+         each, in order -- Ruby evaluates the arguments before between? runs
+         -- so each is spilled to a temp up front, and only the CONVERSIONS
+         and the refusals are left inside the `&&`, where the compare that
+         reads them is. That is also why the conversions are not put in the
+         call's conversion hold, which would hoist both in front of the `&&`.
+
+         A String bound spills to a rooted `const char *` and compares as it
+         always did -- rooted because the OTHER bound's #to_str allocates
+         before this one is read; every other bound spills boxed, which is
+         both what the conversion reads and what sp_cmperr_desc names in the
+         message. A bound whose class answers no usable #to_str converts to
+         NULL, so its half of the `&&` IS the comparison error #4265 gives; a
+         BOXED bound asks the runtime's rb_check_string_type instead, so one
+         holding a String or a converting object compares here exactly as it
+         would as a boxed operand anywhere else. */
+      int tv = ++g_tmp, tb[2], tc[2], isstr[2];
+      for (int i = 0; i < 2; i++) { tb[i] = ++g_tmp; tc[i] = ++g_tmp; }
+      buf_printf(b, "({ const char *_t%d = ", tv); emit_expr(c, recv, b);
+      buf_printf(b, "; SP_GC_ROOT_STR(_t%d); ", tv);
+      for (int i = 0; i < 2; i++) {
+        isstr[i] = comp_ntype(c, argv[i]) == TY_STRING;
+        if (isstr[i]) {
+          buf_printf(b, "const char *_t%d = ", tb[i]); emit_expr(c, argv[i], b);
+          buf_printf(b, "; SP_GC_ROOT_STR(_t%d); ", tb[i]);
+        }
+        else {
+          buf_printf(b, "sp_RbVal _t%d = ", tb[i]); emit_boxed(c, argv[i], b);
+          buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tb[i]);
+        }
+      }
+      buf_puts(b, "(");
+      for (int i = 0; i < 2; i++) {
+        const char *op = i == 0 ? ">=" : "<=";
+        if (i) buf_puts(b, " && ");
+        if (isstr[i]) { buf_printf(b, "sp_str_cmp_bytes(_t%d, _t%d) %s 0", tv, tb[i], op); continue; }
+        buf_printf(b, "({ const char *_t%d = ", tc[i]);
+        emit_str_cmp_conv(c, argv[i], tb[i], b);
+        buf_printf(b, "; _t%d ? sp_str_cmp_bytes(_t%d, _t%d) %s 0"
+                      " : (sp_raise_cls(\"ArgumentError\", sp_sprintf("
+                      "\"comparison of String with %%s failed\","
+                      " sp_cmperr_desc(_t%d))), FALSE); })",
+                   tc[i], tv, tc[i], op, tb[i]);
+      }
+      buf_puts(b, "); })");
       return;
     }
     if (rt == TY_STRING) {

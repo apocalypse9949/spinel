@@ -361,6 +361,7 @@ extern int g_has_user_coerce;
    typed. See analyze_util.c. */
 int class_coerce_emittable(Compiler *c, int k);
 int class_has_coerce_shape(Compiler *c, int k);
+int class_has_to_str_shape(Compiler *c, int k);
 int is_numeric_coerce_op(const char *op);
 extern int g_has_user_to_io;
 extern int g_gen_obj_hashkey; /* >=1 instantiated class defines #hash + #eql?: emit + install the obj hash/eql key hooks */
@@ -535,6 +536,13 @@ extern int g_unsup_probe;          /* silent emittability probe (drop a dynamic-
    must be. *def_out receives the defining class. Shared by the emitter and the
    native-argument check so both agree on which objects may cross. */
 int obj_conv_method(Compiler *c, TyKind t, const char *conv, TyKind want, int *def_out);
+/* A String comparison's operand: the shape test both the type rules and the
+   arms ask, the conversion emitted on a spilled temp, and the prologue the
+   arms share. See codegen.c. */
+int str_cmp_conv_shape(Compiler *c, int node);
+void emit_str_cmp_conv(Compiler *c, int node, int tmp, Buf *b);
+void emit_str_cmp_prologue(Compiler *c, const char *rtxt, int operand,
+                           int *tr, int *to, int *ts, Buf *b);
 /* 1 iff any class defines a usable #to_int / #to_str -- see codegen.c. */
 int prog_has_conv_method(Compiler *c, const char *conv, TyKind want);
 

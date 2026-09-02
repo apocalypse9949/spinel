@@ -314,6 +314,44 @@ int class_coerce_emittable(Compiler *c, int k) {
   if (!ty_is_array(m->ret) && m->ret != TY_POLY_ARRAY) return 0;
   return 1;
 }
+/* 1 if class k defines a #to_str whose SHAPE a String comparison can convert
+   through: no parameters, and an answer the String slot can take -- a static
+   String, or one the analysis could only pin to poly (a body reading a poly
+   ivar, or one with a nil branch), whose boxed answer takes the check CRuby
+   applies to the RESULT of #to_str. Like the coerce shape above, this
+   consults neither reachability nor emittability: it is asked by the type
+   rules for #casecmp and by every comparison arm the emitter renders, so the
+   TYPED side agrees at every point in the pipeline. The BOXED side does not
+   ask it and cannot: it reaches #to_str through the generated conversion
+   bridge, which carries only a #to_str whose static return is a String
+   (conv_bridge_callee), so a poly-returning one converts typed and answers
+   "no conversion" boxed. That asymmetry is deliberate -- widening the bridge
+   is its own change -- and it is named again where the bridge is asked, in
+   sp_poly_check_str.
+
+   A parameter of any kind is declined even though CRuby only needs #to_str to
+   be callable with none: `def to_str(x = 1)`, `def to_str(*a)` and
+   `def to_str(k: 1)` all fail the C build at the tree's existing conversion
+   site (`"x" + A.new("y")`, checked on all three), and this rule leaves them
+   where it found them rather than adding a new way in. An
+   `attr_reader :to_str` defines no method scope at all, so the lookup below
+   never sees it. A native class is excluded because the conversion is a
+   direct call to a method this TU compiles. */
+int class_has_to_str_shape(Compiler *c, int k) {
+  if (k < 0 || k >= c->nclasses || c->classes[k].is_native_class) return 0;
+  int mi = comp_method_in_chain(c, k, "to_str", NULL);
+  if (mi < 0) return 0;
+  Scope *m = &c->scopes[mi];
+  /* an ALIAS is not this shape yet: the conversion emitter names the call
+     after the protocol (sp_A_to_str) while `alias to_str raw` compiles one
+     function named sp_A_raw, and reachability seeds the implicit protocols by
+     the method's own name, so the aliased body is not emitted at all. Master
+     fails the C build on that pair already (`"x" + A.new("y")`); this rule
+     leaves it exactly where it found it rather than adding a new way in. */
+  if (!sp_streq(m->name, "to_str")) return 0;
+  return m->nparams == 0 && m->rest_idx < 0 &&
+         (m->ret == TY_STRING || m->ret == TY_POLY);
+}
 int is_eq_op(const char *op) {
   static const char *const set[] = {"==", "!=", "===", NULL};
   return str_in(op, set);

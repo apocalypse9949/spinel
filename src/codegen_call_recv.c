@@ -7129,15 +7129,39 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
       else if (sp_streq(name, "undump") && argc == 0) buf_printf(b, "sp_str_undump(%s)", r);
       else if ((sp_streq(name, "casecmp") || sp_streq(name, "casecmp?")) && argc == 1 &&
                comp_ntype(c, argv[0]) == TY_POLY) {
-        /* runtime tag decides: a string argument compares, anything else is
-           nil (the call typed TY_POLY) */
-        int tb2 = ++g_tmp;
-        buf_printf(b, "({ sp_RbVal _t%d = ", tb2); emit_expr(c, argv[0], b);
-        buf_printf(b, "; _t%d.tag == SP_TAG_STR ? ", tb2);
+        /* runtime tag decides: a string argument compares, a boxed object
+           that answers #to_str converts and compares (rb_check_string_type),
+           anything else is nil (the call typed TY_POLY). The receiver is
+           bound and rooted first: #to_str allocates, and the receiver may be
+           a fresh string nothing else holds. The OPERAND is rooted one level
+           down, inside sp_poly_check_str, which is where this arm and the
+           runtime's own boxed comparison meet. */
+        int ta2 = ++g_tmp, tb2 = ++g_tmp, tc2 = ++g_tmp;
+        buf_printf(b, "({ const char *_t%d = %s; SP_GC_ROOT_STR(_t%d);"
+                      " sp_RbVal _t%d = ", ta2, r, ta2, tb2);
+        emit_expr(c, argv[0], b);
+        buf_printf(b, "; const char *_t%d = sp_poly_check_str(_t%d);"
+                      " (_t%d || _t%d.tag == SP_TAG_STR) ? ", tc2, tb2, tc2, tb2);
         if (sp_streq(name, "casecmp"))
-          buf_printf(b, "sp_box_int(sp_str_casecmp(%s, _t%d.v.s ? _t%d.v.s : \"\"))", r, tb2, tb2);
+          buf_printf(b, "sp_box_int(sp_str_casecmp(_t%d, _t%d ? _t%d : \"\"))", ta2, tc2, tc2);
         else
-          buf_printf(b, "sp_box_bool(sp_str_casecmp(%s, _t%d.v.s ? _t%d.v.s : \"\") == 0)", r, tb2, tb2);
+          buf_printf(b, "sp_box_bool(sp_str_casecmp(_t%d, _t%d ? _t%d : \"\") == 0)", ta2, tc2, tc2);
+        buf_puts(b, " : sp_box_nil(); })");
+      }
+      /* an operand whose class answers #to_str: CRuby converts it and
+         compares, where the arm below discarded it and answered nil. The
+         answer is boxed because the conversion can still come back empty --
+         a #to_str that answers nil is CRuby's nil casecmp, not a comparison
+         with "" -- so the call is typed TY_POLY, as it is for a poly operand
+         above (analyze_infer.c, analyze_infer_recv.c). */
+      else if ((sp_streq(name, "casecmp") || sp_streq(name, "casecmp?")) && argc == 1 &&
+               str_cmp_conv_shape(c, argv[0])) {
+        int tr, to, ts;
+        emit_str_cmp_prologue(c, r, argv[0], &tr, &to, &ts, b);
+        if (sp_streq(name, "casecmp"))
+          buf_printf(b, "sp_box_int(sp_str_casecmp(_t%d, _t%d))", tr, ts);
+        else
+          buf_printf(b, "sp_box_bool(sp_str_casecmp(_t%d, _t%d) == 0)", tr, ts);
         buf_puts(b, " : sp_box_nil(); })");
       }
       else if ((sp_streq(name, "casecmp") || sp_streq(name, "casecmp?")) && argc == 1 &&

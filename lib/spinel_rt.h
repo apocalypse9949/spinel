@@ -2321,6 +2321,55 @@ static SP_INLINE const char *sp_poly_arg_str(sp_RbVal v) {
   if (v.tag == SP_TAG_STR) return v.v.s;
   return sp_poly_arg_str_slow(v);
 }
+/* The object half of the check below, split out and kept off the inlined path
+   for the reason sp_poly_arg_str_obj is: the object case is the rare one.
+
+   The value is rooted across the bridge call. #to_str is user Ruby code and
+   allocates, and an object reaching a boxed comparison is often held in
+   nothing but the by-value sp_RbVal the caller passed -- a copy of the
+   caller's, but the collector is non-moving and marks through whatever slot it
+   is handed, so rooting this copy keeps that object alive. Both callers rely
+   on this one root: sp_poly_cmp_to_str below, and the poly casecmp arm the
+   emitter renders. */
+static SP_NOINLINE const char *sp_poly_check_str_obj(sp_RbVal v) {
+  SP_GC_ROOT_RBVAL(v);
+  return sp_obj_to_str_fn((int)v.cls_id, v.v.p);
+}
+/* CRuby's rb_check_string_type, which the String COMPARISONS ask where the
+   argument slots above ask the raising forms: a String answers itself, a user
+   object whose #to_str the conversion bridge carries answers its conversion,
+   and every other value answers NULL without raising. "Not a string" is a real
+   answer here -- it is `"abc" <=> obj`'s nil and `"abc" < obj`'s comparison
+   error -- where in an argument slot it is a TypeError.
+
+   The bridge carries only a #to_str whose static return is a String
+   (conv_bridge_callee), so an object whose #to_str the analysis could pin no
+   further than poly answers NULL here and converts on the TYPED side alone.
+   That asymmetry is deliberate for now, not an oversight to tidy away: giving
+   the bridge a boxed-answer entry is its own change. */
+static SP_INLINE const char *sp_poly_check_str(sp_RbVal v) {
+  if (v.tag == SP_TAG_STR) return v.v.s;
+  if (v.tag == SP_TAG_OBJ && v.cls_id >= 0 && v.v.p && sp_obj_to_str_fn)
+    return sp_poly_check_str_obj(v);
+  return NULL;
+}
+/* The ANSWER of a #to_str the analysis could pin no further than poly, on its
+   way into a String comparison. CRuby's rb_check_string_type checks the answer
+   as well as the method: nil is "no conversion", which is the comparison's own
+   nil or its ArgumentError and which the NULL here hands back to the caller's
+   refusal arm; any other non-String is a TypeError naming both classes. `obj`
+   is the operand itself, for that message -- a class name, so it is read
+   twice. A String answer that is the NULL string is nil to Ruby, and takes the
+   no-conversion path too. */
+static SP_NOINLINE const char *sp_str_cmp_conv(sp_RbVal r, sp_RbVal obj) {
+  if (r.tag == SP_TAG_STR) return r.v.s;
+  if (r.tag == SP_TAG_NIL) return NULL;
+  sp_raise_cls("TypeError",
+               sp_sprintf("can't convert %s to String (%s#to_str gives %s)",
+                          sp_poly_class_name(obj), sp_poly_class_name(obj),
+                          sp_poly_class_name(r)));
+  return NULL;
+}
 
 /* The strict argument forms: nil / true / false in a typed String or Integer
    slot are CRuby's TypeError (File.join("a", nil), [1].take(nil)), where the
@@ -2878,7 +2927,23 @@ typedef sp_int (*sp_obj_cmp_fn)(sp_RbVal a, sp_RbVal b, sp_bool *comparable);
 static sp_obj_cmp_fn sp_obj_cmp_hook = NULL;
 #define SP_IS_BUILTIN_ARRAY(id) ((id) == SP_BUILTIN_INT_ARRAY || (id) == SP_BUILTIN_STR_ARRAY || \
                                  (id) == SP_BUILTIN_FLT_ARRAY || (id) == SP_BUILTIN_POLY_ARRAY)
-static sp_int sp_poly_cmp(sp_RbVal a, sp_RbVal b, sp_bool *comparable) { /* same reasoning as the arithmetic fast paths: two plain numbers match no branch below until the numeric one, eight tests later */ if ((a.tag == SP_TAG_FLT || a.tag == SP_TAG_INT) && (b.tag == SP_TAG_FLT || b.tag == SP_TAG_INT)) { if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) { *comparable = TRUE; return (a.v.i > b.v.i) - (a.v.i < b.v.i); } sp_float _fa = a.tag == SP_TAG_FLT ? a.v.f : (sp_float)a.v.i; sp_float _fb = b.tag == SP_TAG_FLT ? b.v.f : (sp_float)b.v.i; *comparable = TRUE; return (_fa > _fb) - (_fa < _fb); } /* A user class's own `<=>` comes first, exactly as its own &/|/^ does (#3501): the Rational arm below answers for the RECEIVER's sake and a user object is not one of its operands, so `Fixed.new(1) < Rational(1,2)` reported the comparison as failed even though the class compares them perfectly well (#4038). */ if (a.tag == SP_TAG_OBJ && a.cls_id >= 0 && sp_obj_cmp_hook) return sp_obj_cmp_hook(a, b, comparable); if (sp_poly_is_brat(a) || sp_poly_is_brat(b) || sp_poly_is_rational(a) || sp_poly_is_rational(b)) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) { sp_float _af = sp_poly_to_f(a), _bf = sp_poly_to_f(b); *comparable = TRUE; return (_af > _bf) - (_af < _bf); } int _oka = sp_poly_is_brat(a) || sp_poly_is_rational(a) || a.tag == SP_TAG_INT || a.tag == SP_TAG_BIGINT; int _okb = sp_poly_is_brat(b) || sp_poly_is_rational(b) || b.tag == SP_TAG_INT || b.tag == SP_TAG_BIGINT; if (_oka && _okb) { *comparable = TRUE; return sp_brat_cmp_poly(a, b); } *comparable = FALSE; return 0; } if (a.tag == SP_TAG_OBJ && b.tag == SP_TAG_OBJ && SP_IS_BUILTIN_ARRAY(a.cls_id) && SP_IS_BUILTIN_ARRAY(b.cls_id)) return sp_poly_arr_cmp(a, b, comparable); if (a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT) { sp_Bigint *ba = sp_poly_as_bigint(a), *bb = sp_poly_as_bigint(b); if (ba && bb) { *comparable = TRUE; return sp_bigint_cmp(ba, bb); } if (sp_poly_numeric_p(a) && sp_poly_numeric_p(b)) { sp_float af = sp_poly_to_f(a), bf = sp_poly_to_f(b); *comparable = TRUE; return (af > bf) - (af < bf); } *comparable = FALSE; return 0; } if (sp_poly_numeric_p(a) && sp_poly_numeric_p(b)) { sp_float af = sp_poly_to_f(a), bf = sp_poly_to_f(b); *comparable = TRUE; return (af > bf) - (af < bf); } if (a.tag == SP_TAG_STR && b.tag == SP_TAG_STR) { if (a.v.s == NULL || b.v.s == NULL) { *comparable = (a.v.s == b.v.s); return 0; } *comparable = TRUE; return sp_str_cmp_bytes(a.v.s, b.v.s); } if (a.tag == SP_TAG_SYM && b.tag == SP_TAG_SYM) { *comparable = TRUE; if (sp_sym_name_fn) { /* byte-exact: a name may hold a NUL, and strcmp would call `:"a\0b"` equal to `:a` and order them arbitrarily (#nul symbols) */ const char *_na = sp_sym_name_fn((sp_sym)a.v.i), *_nb = sp_sym_name_fn((sp_sym)b.v.i); int _r = strcmp(_na, _nb); /* strcmp decides whenever the names differ before any NUL, and agrees with a byte-exact compare when it does. Only a TIE can hide a difference past an embedded NUL -- `:"a\0b"` against `:a` -- so the byte-exact compare runs just there (#nul symbols), keeping the ordinary comparison one pass. */ if (_r == 0) _r = sp_str_cmp_bytes(_na, _nb); return _r; } return (a.v.i > b.v.i) - (a.v.i < b.v.i); } if (sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b)) return sp_poly_cmp(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b), comparable); if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_TIME && b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_TIME && a.v.p && b.v.p) { *comparable = TRUE; return sp_time_cmp(*(sp_Time *)a.v.p, *(sp_Time *)b.v.p); } if (a.tag == SP_TAG_OBJ && sp_obj_cmp_hook) return sp_obj_cmp_hook(a, b, comparable); *comparable = FALSE; return 0; }
+/* A String compared with a user object that answers #to_str: CRuby's
+   String#<=> converts the operand and compares the strings, and every ordered
+   operator and #between? is built on that one method -- so the boxed side of
+   the rule lands here, once, rather than in each of their entries. The
+   receiver is rooted across the conversion: #to_str allocates, and the string
+   reaching a boxed comparison is often a fresh one the caller holds in
+   nothing but the argument. The OPERAND's root is one level down, inside
+   sp_poly_check_str_obj, which is where both boxed callers meet. */
+static int sp_poly_cmp_to_str(sp_RbVal a, sp_RbVal b, sp_int *out) {
+  if (a.tag != SP_TAG_STR || !a.v.s || b.tag != SP_TAG_OBJ || b.cls_id < 0) return 0;
+  SP_GC_ROOT_RBVAL(a);
+  const char *s = sp_poly_check_str(b);
+  if (!s) return 0;
+  *out = sp_str_cmp_bytes(a.v.s, s);
+  return 1;
+}
+static sp_int sp_poly_cmp(sp_RbVal a, sp_RbVal b, sp_bool *comparable) { /* same reasoning as the arithmetic fast paths: two plain numbers match no branch below until the numeric one, eight tests later */ if ((a.tag == SP_TAG_FLT || a.tag == SP_TAG_INT) && (b.tag == SP_TAG_FLT || b.tag == SP_TAG_INT)) { if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) { *comparable = TRUE; return (a.v.i > b.v.i) - (a.v.i < b.v.i); } sp_float _fa = a.tag == SP_TAG_FLT ? a.v.f : (sp_float)a.v.i; sp_float _fb = b.tag == SP_TAG_FLT ? b.v.f : (sp_float)b.v.i; *comparable = TRUE; return (_fa > _fb) - (_fa < _fb); } /* A user class's own `<=>` comes first, exactly as its own &/|/^ does (#3501): the Rational arm below answers for the RECEIVER's sake and a user object is not one of its operands, so `Fixed.new(1) < Rational(1,2)` reported the comparison as failed even though the class compares them perfectly well (#4038). */ if (a.tag == SP_TAG_OBJ && a.cls_id >= 0 && sp_obj_cmp_hook) return sp_obj_cmp_hook(a, b, comparable); if (sp_poly_is_brat(a) || sp_poly_is_brat(b) || sp_poly_is_rational(a) || sp_poly_is_rational(b)) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) { sp_float _af = sp_poly_to_f(a), _bf = sp_poly_to_f(b); *comparable = TRUE; return (_af > _bf) - (_af < _bf); } int _oka = sp_poly_is_brat(a) || sp_poly_is_rational(a) || a.tag == SP_TAG_INT || a.tag == SP_TAG_BIGINT; int _okb = sp_poly_is_brat(b) || sp_poly_is_rational(b) || b.tag == SP_TAG_INT || b.tag == SP_TAG_BIGINT; if (_oka && _okb) { *comparable = TRUE; return sp_brat_cmp_poly(a, b); } *comparable = FALSE; return 0; } if (a.tag == SP_TAG_OBJ && b.tag == SP_TAG_OBJ && SP_IS_BUILTIN_ARRAY(a.cls_id) && SP_IS_BUILTIN_ARRAY(b.cls_id)) return sp_poly_arr_cmp(a, b, comparable); if (a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT) { sp_Bigint *ba = sp_poly_as_bigint(a), *bb = sp_poly_as_bigint(b); if (ba && bb) { *comparable = TRUE; return sp_bigint_cmp(ba, bb); } if (sp_poly_numeric_p(a) && sp_poly_numeric_p(b)) { sp_float af = sp_poly_to_f(a), bf = sp_poly_to_f(b); *comparable = TRUE; return (af > bf) - (af < bf); } *comparable = FALSE; return 0; } if (sp_poly_numeric_p(a) && sp_poly_numeric_p(b)) { sp_float af = sp_poly_to_f(a), bf = sp_poly_to_f(b); *comparable = TRUE; return (af > bf) - (af < bf); } if (a.tag == SP_TAG_STR && b.tag == SP_TAG_STR) { if (a.v.s == NULL || b.v.s == NULL) { *comparable = (a.v.s == b.v.s); return 0; } *comparable = TRUE; return sp_str_cmp_bytes(a.v.s, b.v.s); } { sp_int _sc; if (sp_poly_cmp_to_str(a, b, &_sc)) { *comparable = TRUE; return _sc; } } if (a.tag == SP_TAG_SYM && b.tag == SP_TAG_SYM) { *comparable = TRUE; if (sp_sym_name_fn) { /* byte-exact: a name may hold a NUL, and strcmp would call `:"a\0b"` equal to `:a` and order them arbitrarily (#nul symbols) */ const char *_na = sp_sym_name_fn((sp_sym)a.v.i), *_nb = sp_sym_name_fn((sp_sym)b.v.i); int _r = strcmp(_na, _nb); /* strcmp decides whenever the names differ before any NUL, and agrees with a byte-exact compare when it does. Only a TIE can hide a difference past an embedded NUL -- `:"a\0b"` against `:a` -- so the byte-exact compare runs just there (#nul symbols), keeping the ordinary comparison one pass. */ if (_r == 0) _r = sp_str_cmp_bytes(_na, _nb); return _r; } return (a.v.i > b.v.i) - (a.v.i < b.v.i); } if (sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b)) return sp_poly_cmp(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b), comparable); if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_TIME && b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_TIME && a.v.p && b.v.p) { *comparable = TRUE; return sp_time_cmp(*(sp_Time *)a.v.p, *(sp_Time *)b.v.p); } if (a.tag == SP_TAG_OBJ && sp_obj_cmp_hook) return sp_obj_cmp_hook(a, b, comparable); *comparable = FALSE; return 0; }
 /* Lexicographic <=> between two boxed int arrays (Array#<=> over int elems),
    so Array#max/min/sort work on an array of int pairs ([delta, idx] tuples). */
 /* sp_poly_cmp_int_arrays: moved to lib/sp_cold.c */
