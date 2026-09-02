@@ -3136,7 +3136,6 @@ else {
        reading it long after the handler is gone (#3726) */
     buf_puts(b, " sp_exc_top--;\n}\nelse {\n  sp_exc_top--;\n  sp_gc_nroots = sp_exc_rootmark[sp_exc_top];\n  "
                 "sp_rescue_sp = sp_rescue_mark[sp_exc_top];\n  "
-                "if (sp_unwind_kind == SP_UNWIND_NONE) sp_proc_homes_unwind();\n  "
                 "if (sp_unwind_kind != SP_UNWIND_NONE) sp_unwind_resume();\n  "
                 /* a bare rescue catches StandardError and its descendants only:
                    this arm caught everything, so a subclass of Exception was

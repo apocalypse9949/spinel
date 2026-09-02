@@ -8048,6 +8048,10 @@ static SP_TLS struct sp_proc_home *sp_unwind_home = NULL;  /* PROCRET target (TH
    result is stored as a void* in sp_exc_obj[]. */
 struct sp_Exception_s;
 static void *sp_exc_recover_named(const char *cls, const char *msg);
+/* forward: drop the handler-stack entries a raise unwinds past. Defined far
+   below, beside the three stacks it pops -- all of them declared after this
+   function, which is why the declaration has to come up here. */
+static void sp_handler_stacks_unwind(void);
 #ifdef SPINEL_EXT_HOST
 SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg);
 #else
@@ -8107,7 +8111,7 @@ SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg) {
      here to the landing, and copying it a second time would only reintroduce
      an allocation between the last read of the caller's pointer and this
      store. */
-  if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_exc_obj[sp_exc_top-1] = sp_pending_exc_obj; sp_pending_exc_obj = NULL; sp_pending_cause = sp_explicit_cause_set ? sp_explicit_cause : (sp_cur_handled() ? sp_cur_handled() : sp_inflight_cause); sp_inflight_cause = NULL; sp_explicit_cause = NULL; sp_explicit_cause_set = 0; sp_last_exc_cls = cls; longjmp(sp_exc_stack[sp_exc_top-1], 1); }
+  if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_exc_obj[sp_exc_top-1] = sp_pending_exc_obj; sp_pending_exc_obj = NULL; sp_pending_cause = sp_explicit_cause_set ? sp_explicit_cause : (sp_cur_handled() ? sp_cur_handled() : sp_inflight_cause); sp_inflight_cause = NULL; sp_explicit_cause = NULL; sp_explicit_cause_set = 0; sp_last_exc_cls = cls; sp_handler_stacks_unwind(); longjmp(sp_exc_stack[sp_exc_top-1], 1); }
   /* Uncaught SystemExit terminates silently with its status (Kernel#exit). */
   if (strcmp(cls, "SystemExit") == 0) exit(sp_exc_exit_status(sp_pending_exc_obj));
   /* Uncaught: CRuby's tail format "<message> (<ClassName>)", prefixed by the
@@ -8654,7 +8658,7 @@ static void sp_mark_brk_vals(void) {
    over (see the unwind machinery above); when there are none it longjmps straight
    home. The `exc_top` field records the exception-handler depth at the method's
    entry so intervening ensures run and so an exception that unwinds the home pops
-   the node (sp_proc_homes_unwind). */
+   the node (sp_handler_stacks_unwind). */
 typedef struct sp_proc_home {
   jmp_buf jb;                 /* the home method's setjmp target (on its C stack) */
   sp_RbVal val;               /* the in-flight return value (nil until delivered) */
@@ -8692,18 +8696,40 @@ static void sp_proc_return(sp_int id, sp_RbVal v) {
   sp_exc_stage_val(v);   /* LocalJumpError#exit_value carries the returned value (#3024) */
   sp_raise_cls("LocalJumpError", "unexpected return");
 }
-/* Pop home nodes whose method an exception has unwound past (recorded exc_top now
-   above the live exception depth), so a later proc-return to a dead home misses
-   and raises LocalJumpError rather than longjmping into a freed C frame. Called
-   wherever a caught exception drops sp_exc_top. A no-op during a proc-return /
-   throw unwind: the target's exc_top is at or below the new depth. */
-static void sp_proc_homes_unwind(void) {
-  while (sp_proc_ret_head && sp_proc_ret_head->exc_top > sp_exc_top)
+/* Drop the catch entries, break scopes and proc-return homes a raise unwinds
+   past. sp_raise_cls calls this just before it longjmps to sp_exc_stack
+   [sp_exc_top-1]; that handler is the frame the exception lands in, and every
+   entry opened INSIDE it dies with the C frames the longjmp skips over.
+
+   Each of the three records the exception depth at its own entry, so "opened
+   inside the landing frame" reads the same on all of them: the landing frame
+   was armed at sp_exc_top-1, so anything entered after it recorded sp_exc_top
+   or more, and anything entered before it recorded less.
+
+   The raise is the one place this can be done once. A landing pops the same
+   entries with `> sp_exc_top` after its own sp_exc_top--, but only six of the
+   ten emitted landings ever did so, and the four that did not -- Kernel#loop
+   in either form, the enumerator fold and the ext-host try -- leaked every
+   entry that unwound through them. Here it also costs the emitted code
+   nothing.
+
+   Not called for a proc return, a throw or a valued break: those longjmp to
+   sp_exc_stack themselves, and each trims its own target stack first
+   (sp_throw sets sp_catch_top, sp_brk_throw sets sp_brk_top, sp_proc_return
+   walks to a live home), so the entries between here and the target are still
+   the ones they mean to deliver to. */
+static void sp_handler_stacks_unwind(void) {
+  /* a dead catch entry is worse than a leak: sp_catch_top is fixed at 64, so a
+     raise out of a catch in a loop walks it off the end -- and a later `throw`
+     that matches one longjmps into a finished frame */
+  while (sp_catch_top > 0 && sp_catch_exc_top[sp_catch_top - 1] >= sp_exc_top)
+    sp_catch_top--;
+  /* a home node whose method the raise unwinds past: a later proc-return to it
+     must miss and raise LocalJumpError, not longjmp into a freed C frame */
+  while (sp_proc_ret_head && sp_proc_ret_head->exc_top >= sp_exc_top)
     sp_proc_ret_head = sp_proc_ret_head->prev;
-  /* pop break scopes the exception unwound past too, so a later proc-break
-     addressing a dead scope misses (LocalJumpError) instead of longjmping
-     into a freed C frame */
-  while (sp_brk_top > 0 && sp_brk_exc_top[sp_brk_top - 1] > sp_exc_top)
+  /* and a break scope, addressed by serial, for the same reason */
+  while (sp_brk_top > 0 && sp_brk_exc_top[sp_brk_top - 1] >= sp_exc_top)
     sp_brk_top--;
 }
 /* GC: mark the current fiber's chain of in-flight return values (suspended fibers
