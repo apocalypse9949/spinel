@@ -8052,6 +8052,45 @@ static SP_TLS struct sp_proc_home *sp_unwind_home = NULL;  /* PROCRET target (TH
    result is stored as a void* in sp_exc_obj[]. */
 struct sp_Exception_s;
 static void *sp_exc_recover_named(const char *cls, const char *msg);
+/* forward: run the registered at_exit hooks and answer the exit status the
+   program should end with -- `status` is what the path that called it would
+   have used, and a hook that exits or raises replaces it (see the definition,
+   next to sp_proc_call). Every path below that ends the process the way
+   CRuby's `exit`, `abort` or an uncaught raise does calls it first.
+   The name keeps the table's own sp_at_exit_ prefix on purpose: mc_top
+   (src/codegen_util.c) reserves the first underscore-separated segment of
+   every runtime symbol against a top-level `def`, and the table already
+   reserves `at`. Naming this one after the verb instead would have newly
+   reserved that verb, renaming the emitted symbol for every program with a
+   top-level method of that name. The printer below is named for the same
+   reason: `exc` is reserved already, where a name built on its verb would
+   newly reserve that verb. The list is built by scanning these sources for
+   sp_ tokens, comments included, so a comment must not spell one either. */
+static int sp_at_exit_run(int status);
+/* Print an uncaught exception in CRuby's tail format. Factored out because two
+   places print it now: the end of sp_raise_cls, and a hook whose own exception
+   reached the drain's protect frame. */
+static void sp_exc_print_uncaught(const char *cls, const char *msg);
+/* CRuby's tail format "<message> (<ClassName>)", prefixed by the raising frame
+   and followed by its callers when the backtrace substrate is live (a --debug
+   build). Without it there is no location to print, and an uncaught raise in a
+   multi-file program said only what went wrong, never where (#3974). Frames
+   are method-granularity, so there is no `:line:`. */
+static void sp_exc_print_uncaught(const char *cls, const char *msg) {
+#if SP_BT_AVAILABLE
+  if (sp_bt_enabled && sp_bt_n > 0) {
+    sp_StrArray *bt = sp_bt_format(sp_bt_buf, sp_bt_n);
+    if (bt && bt->len > 0) {
+      fprintf(stderr, "%s: %s (%s)\n", sp_StrArray_get(bt, 0),
+              (msg && *msg) ? msg : cls, cls);
+      for (sp_int _i = 1; _i < bt->len; _i++)
+        fprintf(stderr, "\tfrom %s\n", sp_StrArray_get(bt, _i));
+      return;
+    }
+  }
+#endif
+  fprintf(stderr, "%s (%s)\n", (msg && *msg) ? msg : cls, cls);
+}
 #ifdef SPINEL_EXT_HOST
 SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg);
 #else
@@ -8112,26 +8151,29 @@ SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg) {
      an allocation between the last read of the caller's pointer and this
      store. */
   if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_exc_obj[sp_exc_top-1] = sp_pending_exc_obj; sp_pending_exc_obj = NULL; sp_pending_cause = sp_explicit_cause_set ? sp_explicit_cause : (sp_cur_handled() ? sp_cur_handled() : sp_inflight_cause); sp_inflight_cause = NULL; sp_explicit_cause = NULL; sp_explicit_cause_set = 0; sp_last_exc_cls = cls; longjmp(sp_exc_stack[sp_exc_top-1], 1); }
-  /* Uncaught SystemExit terminates silently with its status (Kernel#exit). */
-  if (strcmp(cls, "SystemExit") == 0) exit(sp_exc_exit_status(sp_pending_exc_obj));
-  /* Uncaught: CRuby's tail format "<message> (<ClassName>)", prefixed by the
-     raising frame and followed by its callers when the backtrace substrate is
-     live (a --debug build). Without it there is no location to print, and an
-     uncaught raise in a multi-file program said only what went wrong, never
-     where (#3974). Frames are method-granularity, so there is no `:line:`. */
+  /* Uncaught SystemExit terminates silently with its status (Kernel#exit).
+     Read the status BEFORE the hooks run: it lives in the pending exception
+     object, which nothing roots once the hooks start allocating. */
+  if (strcmp(cls, "SystemExit") == 0) exit(sp_at_exit_run(sp_exc_exit_status(sp_pending_exc_obj)));
+  /* An uncaught exception prints its text AFTER the hooks have run, which is
+     the order CRuby prints them in, and the status is theirs to change (a hook
+     that calls `exit 5` makes an uncaught raise exit 5, still printing the
+     error). `msg` survives the hooks because it was laundered onto the string
+     heap and rooted at the top of this function and that root is never popped;
+     `cls` is a codegen-emitted literal the collector never touches. The
+     backtrace substrate is not so lucky: a hook that raises overwrites it, so
+     a debug build keeps its own copy across the drain. */
 #if SP_BT_AVAILABLE
-  if (sp_bt_enabled && sp_bt_n > 0) {
-    sp_StrArray *bt = sp_bt_format(sp_bt_buf, sp_bt_n);
-    if (bt && bt->len > 0) {
-      fprintf(stderr, "%s: %s (%s)\n", sp_StrArray_get(bt, 0),
-              (msg && *msg) ? msg : cls, cls);
-      for (sp_int _i = 1; _i < bt->len; _i++)
-        fprintf(stderr, "\tfrom %s\n", sp_StrArray_get(bt, _i));
-      exit(1);
-    }
-  }
+  void *_bt_keep[256];
+  int _bt_keep_n = (sp_bt_enabled && sp_bt_n > 0) ? sp_bt_n : 0;
+  if (_bt_keep_n > 0) memcpy(_bt_keep, sp_bt_buf, sizeof(void *) * (size_t)_bt_keep_n);
 #endif
-  fprintf(stderr, "%s (%s)\n", (msg && *msg) ? msg : cls, cls); exit(1); }
+  { int status = sp_at_exit_run(1);
+#if SP_BT_AVAILABLE
+    if (_bt_keep_n > 0) { memcpy(sp_bt_buf, _bt_keep, sizeof(void *) * (size_t)_bt_keep_n); sp_bt_n = _bt_keep_n; }
+#endif
+    sp_exc_print_uncaught(cls, msg);
+    exit(status); } }
 #endif
 static void sp_raise(const char *msg) { sp_raise_cls("RuntimeError", msg); }
 
@@ -8339,7 +8381,7 @@ SP_NORETURN SP_COLD static void sp_exit_raise(int status) {
     e->result = sp_box_int((sp_int)status);
     sp_raise_exc((volatile sp_Exception *)e);
   }
-  exit(status);
+  exit(sp_at_exit_run(status));
 }
 /* Kernel#abort: write the message to stderr, then raise a rescuable
    SystemExit with status 1 carrying that message (#3077). */
@@ -8351,7 +8393,7 @@ SP_NORETURN SP_COLD static void sp_abort_raise(const char *msg) {
     e->result = sp_box_int((sp_int)1);
     sp_raise_exc((volatile sp_Exception *)e);
   }
-  exit(1);
+  exit(sp_at_exit_run(1));
 }
 static void sp_raise_exc(volatile sp_Exception *ve) {
   sp_Exception *e = (sp_Exception *)ve;
@@ -9159,8 +9201,9 @@ sp_IntArray *sp_file_binread_bytes(const char *path);
    `start` field for an O(1) head peel (from == 0); the others
    shift the tail down to fill the hole. */
 /* at_exit hooks: a static LIFO of registered procs. Initialized
-   zero-len in BSS; main()'s tail walks it in reverse-registration
-   order before returning.
+   zero-len in BSS; sp_at_exit_run (below, with sp_proc_call)
+   drains it in reverse-registration order on every path that ends
+   the program the way CRuby runs the hooks on.
    The table is a GC root: the registering expression stores the Proc
    here and drops it, so between `at_exit { }` and the hook actually
    running this array is the only reference to the Proc and to the
@@ -10068,6 +10111,78 @@ sp_int sp_proc_call(sp_Proc *p, sp_int argc, sp_int *args);
 #else
 sp_int sp_proc_call(sp_Proc *p, sp_int argc, sp_int *args) { if (!p || !p->fn) return 0; if (!args) { sp_int noargs[16] = {0}; return ((sp_int (*)(void *, sp_int, sp_int *))p->fn)(p->cap, 0, noargs); } return ((sp_int (*)(void *, sp_int, sp_int *))p->fn)(p->cap, argc, args); }
 #endif
+
+/* Run the at_exit hooks, most recently registered first, and answer the status
+   the process should end with. `status` in is what the terminating path would
+   have used on its own (0 falling off main's end, N for `exit N`, 1 for abort
+   or an uncaught raise); a hook that ends the program replaces it, and the
+   last such hook wins -- which is CRuby's rule: `exit 7` in a hook makes the
+   program exit 7, and a hook raising anything else makes it exit 1.
+
+   Each hook runs under its own protect frame -- the same sequence the ext-host
+   `<init>_try` helper arms (src/codegen.c) -- because that is what CRuby does:
+   every end proc runs inside its own rb_protect, so a hook that exits, aborts
+   or raises ends THAT hook and the ones after it still run. Without the frame
+   `exit` inside a hook would take sp_exit_raise's direct branch and kill the
+   process from inside this loop, and an uncaught error waiting to be printed
+   after the drain would be lost with it. On a landing the frame's own exception
+   is read out of the slot it was stored in: a SystemExit gives the new status,
+   anything else is printed where it happened -- CRuby prints a hook's error at
+   once, before the remaining hooks run -- and leaves the status 1.
+
+   Each hook is also popped off the table BEFORE it is called, so a hook that
+   registers another one during the drain gets it run (CRuby does too), and no
+   hook can run twice. The popped hook is rooted for the duration of its call:
+   the table is the collector's only handle on it, and the pop takes that handle
+   away. */
+static int sp_at_exit_run(int status) {
+  /* The hooks run at termination, where the path that got here has left its own
+     raise in the pending slots. Clear them, or the first `raise` inside a hook
+     binds the TERMINATING exception instead of its own: sp_raise_cls' recovery
+     guards read sp_pending_exc_obj and take it as the object being raised. */
+  sp_pending_exc_obj = NULL; sp_pending_cause = NULL; sp_inflight_cause = NULL;
+  sp_explicit_cause = NULL; sp_explicit_cause_set = 0;
+  /* setjmp: `st` is written on the landing path and read after it. */
+  volatile int st = status;
+  sp_int args[16] = {0};   /* sp_proc_call's fixed slot convention */
+  while (sp_at_exit_count > 0) {
+    sp_Proc *h = sp_at_exit_hooks[--sp_at_exit_count];
+    SP_GC_ROOT(h);
+    if (!h) continue;
+    /* Every hook starts from an empty proc-return / break / catch state, the
+       way CRuby's end procs do: it has unwound the whole program before the
+       first one runs, and a hook that ends by raising has unwound itself
+       before the next one does. So a `break` or `throw` from a hook, or a
+       `return` through a proc that escaped a method an earlier hook raised
+       out of, MISSES and raises what CRuby raises -- LocalJumpError,
+       UncaughtThrowError -- instead of longjmping into a C frame that has
+       already returned. (A `return` written in the hook itself is compiled
+       as the block's own return and never reaches these stacks.) Only the
+       exception stack is left alone: this loop's own frame is on it. */
+    sp_proc_ret_head = NULL; sp_brk_top = 0; sp_catch_top = 0;
+    sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp;
+    sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;
+    if (setjmp(sp_exc_stack[sp_exc_top - 1]) == 0) {
+      sp_proc_call(h, 0, args);
+      sp_exc_top--;
+      continue;
+    }
+    sp_exc_top--;
+    sp_gc_nroots = sp_exc_rootmark[sp_exc_top]; sp_rescue_sp = sp_rescue_mark[sp_exc_top];
+    { const char *ecls = sp_exc_cls[sp_exc_top];
+      const char *emsg = sp_exc_msg[sp_exc_top];
+      void *eobj = sp_exc_obj[sp_exc_top];
+      SP_GC_ROOT_STR(emsg);   /* printing formats a backtrace, which allocates */
+      SP_GC_ROOT(eobj);
+      if (ecls && strcmp(ecls, "SystemExit") == 0) st = sp_exc_exit_status(eobj);
+      else {
+        sp_exc_print_uncaught(ecls ? ecls : "RuntimeError", emsg);
+        st = 1;
+      }
+    }
+  }
+  return st;
+}
 
 /* ---- Enumerable on a builtin Array receiver, driven by a real sp_Proc ----
 

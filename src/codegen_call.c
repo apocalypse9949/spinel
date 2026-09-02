@@ -18952,8 +18952,9 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     return;
   }
 
-  /* at_exit { ... } -> register the block as a Proc; main()'s tail runs the
-     hooks in reverse order. The registration expression evaluates to the proc. */
+  /* at_exit { ... } -> register the block as a Proc; sp_at_exit_run runs
+     the hooks in reverse order, from main()'s tail and from every other path
+     that ends the program. The registration expression evaluates to the proc. */
   if (recv < 0 && sp_streq(name, "at_exit") && nt_ref(nt, id, "block") >= 0 && !bare_call_class_owned(c, id)) {
     g_needs_at_exit = 1;
     buf_puts(b, "(sp_at_exit_hooks[sp_at_exit_count++] = ");
