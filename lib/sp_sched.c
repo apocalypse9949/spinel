@@ -416,6 +416,12 @@ static void reg_remove(sp_thread *t) {
 static void (*g_prev_globals_hook)(void) = NULL;
 static void sp_sched_globals_mark(void) {
   for (sp_thread *t = g_all; t; t = t->all_next) sp_gc_mark(t);
+  /* The main thread is a static struct, not a registry entry, so nothing
+     above marks what hangs off it -- and its thread-local map
+     (Thread.current[:k] = v on the main thread) is a GC object. Unmarked, a
+     collection freed the map while g_main_thread.tls still pointed at it,
+     and the next Thread#[]= wrote into freed memory. */
+  if (g_main_thread.tls) sp_gc_mark(g_main_thread.tls);
 #ifdef SP_THREADS
   /* Mark each parked worker's published roots. Reaches the per-worker root fibers
      (idle/main workers) that are not on sp_fiber_list_head; green-thread fibers
