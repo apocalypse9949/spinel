@@ -8704,6 +8704,16 @@ static void sp_publish_worker_roots(void) {
     _sp_gc_root_push((void **)((uintptr_t)&h->val | (uintptr_t)1));   /* sp_RbVal root */
   for (int i = 0; i < sp_brk_top; i++)
     _sp_gc_root_push((void **)((uintptr_t)&sp_brk_val[i] | (uintptr_t)1));
+  /* The boxed proc calling-convention channel is per-worker too, and the
+     globals hook marks only the collecting worker's copy. Whatever a boxed
+     call last left in another worker's slots -- an argument, or a returned
+     object nothing else names any more -- is a root on that worker until its
+     next boxed call, exactly as it is on one worker (where the globals hook
+     reaches it every cycle). Unpublished, a collection elsewhere frees it and
+     the owning worker's next collection marks a freed pointer. */
+  _sp_gc_root_push((void **)((uintptr_t)&_sp_proc_poly_ret | (uintptr_t)1));
+  for (int i = 0; i < 16; i++)
+    _sp_gc_root_push((void **)((uintptr_t)&_sp_proc_poly_args[i] | (uintptr_t)1));
 }
 __attribute__((constructor)) static void sp_install_safepoint_publish(void) {
   sp_safepoint_publish_hook = sp_publish_worker_roots;
