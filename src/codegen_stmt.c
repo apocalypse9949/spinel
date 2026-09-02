@@ -9934,7 +9934,16 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
       int t = ++g_tmp;
       char rv[32]; snprintf(rv, sizeof rv, "_t%d", t);
       emit_indent(b, indent); emit_ctype(c, rt, b);
-      buf_printf(b, " _t%d = %s;\n", t, rt == TY_RANGE ? "(sp_Range){0}" : default_value(rt));
+      /* emit_ctype declares a BY-VALUE object class as a bare struct, and
+         default_value cannot know that: it takes a TyKind, and the value-ness
+         lives on the class. It answers NULL, which is not a struct, so a
+         method returning such a class with an ensure in its body did not
+         build (#4270). The ensure's own deferred-return slot makes the same
+         distinction (#4268); this is that question for the begin's result. */
+      if (comp_ty_value_obj(c, rt))
+        buf_printf(b, " _t%d = (sp_%s){0};\n", t, c->classes[ty_object_class(rt)].c_name);
+      else
+        buf_printf(b, " _t%d = %s;\n", t, rt == TY_RANGE ? "(sp_Range){0}" : default_value(rt));
       int sp = g_result_poly; g_result_poly = (rt == TY_POLY);
       emit_begin(c, id, b, indent, rv);
       g_result_poly = sp;
