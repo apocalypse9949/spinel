@@ -1266,6 +1266,8 @@ static void sp_mark_in_flight_exceptions(void);
 static void sp_mark_proc_homes(void);
 /* Mark in-flight valued-break values; defined with the sp_brk machinery. */
 static void sp_mark_brk_vals(void);
+/* Mark the registered at_exit hooks; defined with the hook table further down. */
+static void sp_mark_at_exit_hooks(void);
 
 /* Mark the regex globals as live during GC. Each holds a pointer to a
    string allocated via sp_str_alloc_raw on the str-heap; without this
@@ -1303,6 +1305,8 @@ static void sp_re_mark_globals(void) {
   sp_mark_proc_homes();
   SP_GLB_PHASE("globals:break-values");
   sp_mark_brk_vals();
+  SP_GLB_PHASE("globals:at-exit");
+  sp_mark_at_exit_hooks();
   SP_GLB_PHASE("globals:fiber-storage");
   sp_mark_fiber_root_storage();
   SP_GLB_PHASE("globals");
@@ -9156,11 +9160,19 @@ sp_IntArray *sp_file_binread_bytes(const char *path);
    shift the tail down to fill the hole. */
 /* at_exit hooks: a static LIFO of registered procs. Initialized
    zero-len in BSS; main()'s tail walks it in reverse-registration
-   order before returning. */
+   order before returning.
+   The table is a GC root: the registering expression stores the Proc
+   here and drops it, so between `at_exit { }` and the hook actually
+   running this array is the only reference to the Proc and to the
+   environment it captured. */
 #define SP_AT_EXIT_MAX 256
 struct sp_Proc;
 static struct sp_Proc *sp_at_exit_hooks[SP_AT_EXIT_MAX];
 static sp_int sp_at_exit_count = 0;
+static void sp_mark_at_exit_hooks(void) {
+  for (sp_int i = 0; i < sp_at_exit_count; i++)
+    if (sp_at_exit_hooks[i]) sp_gc_mark(sp_at_exit_hooks[i]);
+}
 
 
 
