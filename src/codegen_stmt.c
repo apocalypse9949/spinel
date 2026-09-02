@@ -5838,9 +5838,13 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
        UNKNOWN were excluded; TY_NIL was not, and emit_ctype has no name for it,
        so an ensure inside a nil-returning instantiation declared `void _retvN`
        and the build stopped (#4245). nil carries no value to defer, exactly
-       like void. */
+       like void. Object kinds are declared by emit_ctype through their class,
+       which c_type_name does not name: asking it alone dropped every
+       object-returning method to a bare `return;` out of a non-void C
+       function, and the build stopped again. */
     int has_retval = (g_ret_type != TY_VOID && g_ret_type != TY_UNKNOWN &&
-                      g_ret_type != TY_NIL && c_type_name(g_ret_type) != NULL);
+                      g_ret_type != TY_NIL &&
+                      (ty_is_object(g_ret_type) || c_type_name(g_ret_type) != NULL));
     emit_indent(b, indent); buf_printf(b, "int _retf%d = 0;\n", eid);
     emit_indent(b, indent); buf_printf(b, "int _nxtf%d = 0; (void)_nxtf%d;\n", eid, eid);
     /* _excf/_excmsg/_exccls track an unhandled exception (no rescue) so
@@ -5852,7 +5856,12 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
     emit_indent(b, indent); buf_printf(b, "void *_excobj%d = NULL;\n", eid);
     if (has_retval) {
       emit_indent(b, indent); emit_ctype(c, g_ret_type, b);
-      buf_printf(b, " _retv%d = %s;\n", eid, default_value(g_ret_type));
+      /* a by-value object class is a bare struct: default_value's NULL is
+         ill-typed C there */
+      if (ty_is_object(g_ret_type) && comp_ty_value_obj(c, g_ret_type))
+        buf_printf(b, " _retv%d = (sp_%s){0};\n", eid, c->classes[ty_object_class(g_ret_type)].c_name);
+      else
+        buf_printf(b, " _retv%d = %s;\n", eid, default_value(g_ret_type));
     }
     g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth };
 
