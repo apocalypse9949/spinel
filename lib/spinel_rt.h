@@ -8268,15 +8268,12 @@ SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg) {
      here to the landing, and copying it a second time would only reintroduce
      an allocation between the last read of the caller's pointer and this
      store. */
-  if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_exc_obj[sp_exc_top-1] = sp_pending_exc_obj; sp_pending_exc_obj = NULL; sp_pending_cause = sp_explicit_cause_set ? sp_explicit_cause : (sp_cur_handled() ? sp_cur_handled() : sp_inflight_cause); sp_inflight_cause = NULL; sp_explicit_cause = NULL; sp_explicit_cause_set = 0; sp_last_exc_cls = cls; sp_handler_stacks_unwind(); longjmp(sp_exc_stack[sp_exc_top-1], 1); }
-  /* Uncaught SystemExit terminates silently with its status (Kernel#exit). */
-  if (strcmp(cls, "SystemExit") == 0) exit(sp_exc_exit_status(sp_pending_exc_obj));
   /* Uncaught: CRuby's tail format "<message> (<ClassName>)", prefixed by the
      raising frame and followed by its callers when the backtrace substrate is
      live (a --debug build). Without it there is no location to print, and an
      uncaught raise in a multi-file program said only what went wrong, never
      where (#3974). Frames are method-granularity, so there is no `:line:`. */
-  if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_exc_obj[sp_exc_top-1] = sp_pending_exc_obj; sp_pending_exc_obj = NULL; sp_pending_cause = sp_explicit_cause_set ? sp_explicit_cause : (sp_cur_handled() ? sp_cur_handled() : sp_inflight_cause); sp_inflight_cause = NULL; sp_explicit_cause = NULL; sp_explicit_cause_set = 0; sp_last_exc_cls = cls; longjmp(sp_exc_stack[sp_exc_top-1], 1); }
+  if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_exc_obj[sp_exc_top-1] = sp_pending_exc_obj; sp_pending_exc_obj = NULL; sp_pending_cause = sp_explicit_cause_set ? sp_explicit_cause : (sp_cur_handled() ? sp_cur_handled() : sp_inflight_cause); sp_inflight_cause = NULL; sp_explicit_cause = NULL; sp_explicit_cause_set = 0; sp_last_exc_cls = cls; sp_handler_stacks_unwind(); longjmp(sp_exc_stack[sp_exc_top-1], 1); }
   /* Uncaught SystemExit terminates silently with its status (Kernel#exit).
      Read the status BEFORE the hooks run: it lives in the pending exception
      object, which nothing roots once the hooks start allocating. */
