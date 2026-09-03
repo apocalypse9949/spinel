@@ -319,8 +319,9 @@ typedef struct { const char **v; int n, cap; } NameSet;
    held in `_cap` instead of a (non-existent) local. NULL outside such a body. */
 extern const char *g_cap_struct;
 extern NameSet *g_cap_names;
-/* set when the program registers an at_exit hook; main()'s tail then runs them
-   in reverse registration order. */
+/* set when the program registers an at_exit hook; main()'s tail then calls
+   sp_at_exit_run(), which runs them in reverse registration order (the
+   runtime calls the same helper on the exit / abort / uncaught-raise paths). */
 extern int g_needs_at_exit;
 /* set when the program may use class-introspection machinery (user classes, or
    .class / is_a? / kind_of? / instance_of? / ancestors / superclass / === on

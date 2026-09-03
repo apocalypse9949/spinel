@@ -10246,9 +10246,12 @@ char *codegen_program(const NodeTable *nt) {
   /* Run any fire-and-forget threads that never got a turn before the program
      exits, so their side effects happen. */
   if (g_uses_threads) buf_puts(body, "    sp_sched_drain();\n");
-  if (g_needs_at_exit)
-    buf_puts(body, "  { sp_int _ax_args[16] = {0}; for (sp_int _ax = sp_at_exit_count - 1; _ax >= 0; _ax--) sp_proc_call(sp_at_exit_hooks[_ax], 0, _ax_args); }\n");
+  /* main's exit status is the hooks' to change: a hook that calls `exit`, or
+     that raises, decides what the program exits with (sp_at_exit_run). The
+     ext-init form is a void function, so there it just runs them. */
+  if (g_needs_at_exit && g_ext_init_name) buf_puts(body, "  sp_at_exit_run(0);\n");
   if (g_ext_init_name) buf_puts(body, "}\n");
+  else if (g_needs_at_exit) buf_puts(body, "  return sp_at_exit_run(0);\n}\n");
   else buf_puts(body, "  return 0;\n}\n");
 
   emit_regex_section(c, &b);
