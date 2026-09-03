@@ -9830,6 +9830,15 @@ else {
     emit_indent(b, indent + 1); buf_puts(b, "sp_gc_nroots = sp_exc_rootmark[sp_exc_top]; sp_rescue_sp = sp_rescue_mark[sp_exc_top];\n");
     /* A non-local unwind only passes through (no ensure here): continue it. */
     emit_indent(b, indent + 1); buf_puts(b, "if (sp_unwind_kind != SP_UNWIND_NONE) sp_unwind_resume();\n");
+    /* A bare rescue catches StandardError and its descendants only. #3725 put
+       this guard on the rvalue form of the modifier and this, its statement
+       twin, kept catching everything: `foo rescue handler` swallowed an
+       Exception, a ScriptError and a SystemExit -- the last one turning an
+       `exit 3` into a normal exit 0. */
+    emit_indent(b, indent + 1);
+    buf_puts(b, "if (!sp_exc_is_standard_error((const char *)sp_last_exc_cls)) {"
+                " sp_pending_exc_obj = sp_exc_obj[sp_exc_top];"
+                " sp_raise_cls((const char *)sp_last_exc_cls, sp_exc_msg[sp_exc_top]); }\n");
     /* $! and #cause threading inside the fallback, like a full rescue arm */
     {
       int tce = ++g_tmp;
