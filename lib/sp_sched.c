@@ -542,9 +542,20 @@ static void sp_sched_ensure_workers(void) {
 }
 #endif
 
+/* CRuby's two-line report: the thread's own #inspect, then the same tail an
+   uncaught exception prints. The old one-line form named the thread by its
+   small serial, which says nothing about WHICH thread in a program that
+   spawns several -- #inspect carries the spawn site. sp_Thread_inspect
+   allocates, and the caller has already dropped t from the registry, so root
+   t across it. */
 static void sp_thread_report(sp_thread *t) {
-  fprintf(stderr, "#<Thread:%u> terminated with exception: %s (%s)\n",
-          t->id, t->exc_msg ? t->exc_msg : "", t->exc_cls ? t->exc_cls : "Exception");
+  SP_GC_ROOT(t);
+  const char *cls = t->exc_cls ? t->exc_cls : "Exception";
+  const char *msg = t->exc_msg ? t->exc_msg : "";
+  SP_GC_ROOT_STR(msg);
+  const char *ins = sp_Thread_inspect(t);
+  fprintf(stderr, "%s terminated with exception (report_on_exception is true):\n", ins);
+  fprintf(stderr, "%s (%s)\n", (msg && *msg) ? msg : cls, cls);
 }
 
 /* Park/wake primitives (defined below; used by join here). */
@@ -611,7 +622,13 @@ static void run_thread_once(sp_thread *t) { sp_gc_wb((void*)t);   /* PRE/POST: s
     int do_report = 0;
     if (raised) {
       t->has_exc = 1; t->exc_cls = ec; t->exc_msg = em; t->exc_obj = eo;
-      do_report = t->report_on_exception;
+      /* A SystemExit is not a thread dying badly, it is the program being
+         asked to end: CRuby reports every other class here and stays silent
+         for this one, then lets the exception surface at join and terminate
+         with its status. Reporting it printed a scary line for an ordinary
+         `exit` inside a thread. */
+      do_report = t->report_on_exception &&
+                  !(ec && strcmp(ec, "SystemExit") == 0);
     }
     sp_thread_wake_joiners(t);
     reg_remove(t);   /* collectable once no user reference remains */
