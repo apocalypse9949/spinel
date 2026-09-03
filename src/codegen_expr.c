@@ -2702,7 +2702,23 @@ else {
         int ln = 0;
         const int *lb = live >= 0 ? nt_arr(nt, live, "body", &ln) : NULL;
         if (ln == 0) { buf_puts(b, "sp_box_nil()"); return; }
-        if (ln == 1) { emit_expr(c, lb[0], b); return; }
+        /* The live arm still has to be rendered at the WHOLE expression's
+           type, the way the unfolded pair below is: the slot receiving this
+           was declared from that type, and the arm's own may be narrower.
+           Emitting the arm raw put a `const char *` into an sp_RbVal local
+           whenever an is_a? predicate folded (#4280's tmpdir package could
+           not compile at its simplest call). */
+        TyKind fres = comp_ntype(c, id);
+        if (fres == TY_VOID || fres == TY_NIL) fres = TY_POLY;
+        /* Only the WIDENING conversion, into a poly result. Forcing a narrower
+           one would convert rather than carry -- and where the result type is
+           narrower than the arm the analysis has already gone wrong, so the C
+           type error that raises is the honest answer, not a silent value. */
+        int fbox = fres == TY_POLY && comp_ntype(c, lb[ln - 1]) != TY_POLY;
+        if (ln == 1) {
+          if (fbox) emit_ternary_arm(c, lb[0], fres, b); else emit_expr(c, lb[0], b);
+          return;
+        }
         /* The leading statements go into the PRELUDE, not inside a statement
            expression around the value. The last element is emitted with
            emit_expr, and an arm that is itself a conditional hoists its own
@@ -2713,7 +2729,8 @@ else {
            won and a branch reached its tail without running its own first
            line (#4139). The prelude keeps them in source order. */
         for (int j = 0; j < ln - 1; j++) emit_stmt(c, lb[j], g_pre, g_indent);
-        emit_expr(c, lb[ln - 1], b);
+        if (fbox) emit_ternary_arm(c, lb[ln - 1], fres, b);
+        else emit_expr(c, lb[ln - 1], b);
         return;
       }
     }
