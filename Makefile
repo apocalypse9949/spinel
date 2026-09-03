@@ -128,7 +128,7 @@ export LD_LIBRARY_PATH := $(OPENSSL_PREFIX)/lib$(if $(LD_LIBRARY_PATH),:$(LD_LIB
 endif
 endif
 endif
-BUNDLED_NATIVE_OBJS = packages/json/sp_json.o packages/stringio/sp_stringio.o packages/strscan/sp_strscan.o packages/base64/sp_base64.o
+BUNDLED_NATIVE_OBJS = packages/json/sp_json.o packages/stringio/sp_stringio.o packages/strscan/sp_strscan.o packages/base64/sp_base64.o packages/tmpdir/sp_tmpdir.o
 ifeq ($(OPENSSL_AVAILABLE),yes)
 BUNDLED_NATIVE_OBJS += packages/openssl/sp_openssl.o
 endif
@@ -383,6 +383,15 @@ packages/base64/sp_base64.o: packages/base64/sp_base64.c \
 packages/base64/sp_base64_mt.o: packages/base64/sp_base64.c \
                                 lib/spinel/runtime.h lib/sp_alloc.h lib/sp_gc.h lib/sp_types.h
 	$(CC) -c $(COPT) -Wno-all $(SEC_FLAGS) $(PKG_MT_FLAGS) -Ilib packages/base64/sp_base64.c -o $@
+
+# tmpdir: Dir.tmpdir and Dir.mktmpdir, the system temp directory and a
+# unique-directory creator. Pure C, no struct.
+packages/tmpdir/sp_tmpdir.o: packages/tmpdir/sp_tmpdir.c \
+                             lib/spinel/runtime.h lib/sp_alloc.h lib/sp_gc.h lib/sp_types.h
+	$(CC) -c $(COPT) -Wno-all $(SEC_FLAGS) -Ilib packages/tmpdir/sp_tmpdir.c -o $@
+packages/tmpdir/sp_tmpdir_mt.o: packages/tmpdir/sp_tmpdir.c \
+                                lib/spinel/runtime.h lib/sp_alloc.h lib/sp_gc.h lib/sp_types.h
+	$(CC) -c $(COPT) -Wno-all $(SEC_FLAGS) $(PKG_MT_FLAGS) -Ilib packages/tmpdir/sp_tmpdir.c -o $@
 
 build/sp_cold.o: lib/sp_cold.c $(RT_HDRS)
 	@mkdir -p build
