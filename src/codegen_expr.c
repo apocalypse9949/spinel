@@ -2159,6 +2159,9 @@ void emit_expr(Compiler *c, int id, Buf *b) {
       if (sp_streq(nm, "SEPARATOR"))      { buf_puts(b, "(&(\"\\xff\" \"/\")[1])"); return; }
       if (sp_streq(nm, "PATH_SEPARATOR")) { buf_puts(b, "(&(\"\\xff\" \":\")[1])"); return; }
       if (sp_streq(nm, "ALT_SEPARATOR"))  { buf_puts(b, "((const char *)0)"); return; }  /* nil off Windows (#2781) */
+      /* the null device, the name Process.spawn/File.open take to discard a
+         stream. Windows is not a target, so it is /dev/null (#4284). */
+      if (sp_streq(nm, "NULL"))           { buf_puts(b, "(&(\"\\xff\" \"/dev/null\")[1])"); return; }
       /* the open(2) flag constants, via the C macros (#2788) */
       if (sp_streq(nm, "RDONLY"))   { buf_puts(b, "((sp_int)O_RDONLY)"); return; }
       if (sp_streq(nm, "WRONLY"))   { buf_puts(b, "((sp_int)O_WRONLY)"); return; }

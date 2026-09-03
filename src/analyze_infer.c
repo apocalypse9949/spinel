@@ -6245,7 +6245,7 @@ TyKind infer_uncached(Compiler *c, int id) {
       return TY_POLY;  /* a boxed Encoding value */
     if (par_nm && sp_streq(par_nm, "File")) {
       if (nm && (sp_streq(nm, "SEPARATOR") || sp_streq(nm, "PATH_SEPARATOR") ||
-                 sp_streq(nm, "ALT_SEPARATOR"))) return TY_STRING;
+                 sp_streq(nm, "ALT_SEPARATOR") || sp_streq(nm, "NULL"))) return TY_STRING;
       if (nm && (sp_streq(nm, "RDONLY") || sp_streq(nm, "WRONLY") || sp_streq(nm, "RDWR") ||
                  sp_streq(nm, "CREAT") || sp_streq(nm, "EXCL") || sp_streq(nm, "TRUNC") ||
                  sp_streq(nm, "APPEND") || sp_streq(nm, "NONBLOCK") || sp_streq(nm, "BINARY") ||
