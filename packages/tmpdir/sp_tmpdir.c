@@ -139,9 +139,21 @@ static const char *tmpdir_mkdtemp(const char *prefix, const char *suffix,
   return sp_str_empty;  /* unreachable */
 }
 
+/* CRuby's Dir.tmpdir does not hand back $TMPDIR unseen: a directory that
+   does not exist, is not a directory, or cannot be written and searched is
+   not usable, and it falls back to /tmp. Returning it raw only moved the
+   failure to the mkdir, with an error naming a path the program never
+   chose. */
+static int tmpdir_usable(const char *p) {
+  struct stat st;
+  if (stat(p, &st) != 0) return 0;
+  if (!S_ISDIR(st.st_mode)) return 0;
+  return access(p, W_OK | X_OK) == 0;
+}
+
 const char *sp_Dir_tmpdir(void) {
   const char *env = getenv("TMPDIR");
-  if (env && *env) {
+  if (env && *env && tmpdir_usable(env)) {
     size_t n = strlen(env);
     char *r = sp_str_alloc_raw(n + 1);
     memcpy(r, env, n);
@@ -162,6 +174,8 @@ const char *sp_Dir_mktmpdir(const char *prefix) {
 }
 
 const char *sp_Dir_mktmpdir_pps(const char *prefix, const char *parent,
-                                const char *suffix) {
-  return tmpdir_mkdtemp(prefix, suffix, parent, TMPDIR_RETRIES);
+                                const char *suffix, sp_int max_try) {
+  return tmpdir_mkdtemp(prefix, suffix, parent,
+                        max_try > 0 && max_try < TMPDIR_RETRIES ? (int)max_try
+                                                                : TMPDIR_RETRIES);
 }

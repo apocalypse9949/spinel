@@ -8,7 +8,7 @@ module TmpdirPackage
   native_obj "packages/tmpdir/sp_tmpdir.o"
   native_func :Dir_tmpdir,     [],         :string, "sp_Dir_tmpdir"
   native_func :Dir_mktmpdir,   [:string],  :string, "sp_Dir_mktmpdir"
-  native_func :Dir_mktmpdir_pps, [:string, :string, :string], :string, "sp_Dir_mktmpdir_pps"
+  native_func :Dir_mktmpdir_pps, [:string, :string, :string, :int], :string, "sp_Dir_mktmpdir_pps"
 end
 
 # Characters CRuby strips from prefix/suffix to keep paths portable.
@@ -53,9 +53,12 @@ class Dir
     parent = parent_dir ? File.path(parent_dir) : Dir.tmpdir
     raise ArgumentError, "empty parent path" if parent.empty?
 
+    # CRuby's max_try bounds the retries on a name collision. It was
+    # computed and then dropped, so the option was silently ignored.
     max_try = options[:max_try] || 10000
+    raise ArgumentError, "max_try must be positive" if max_try < 1
 
-    path = TmpdirPackage.Dir_mktmpdir_pps(prefix, parent, suffix || "")
+    path = TmpdirPackage.Dir_mktmpdir_pps(prefix, parent, suffix || "", max_try)
 
     if block
       begin
