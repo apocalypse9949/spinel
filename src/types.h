@@ -165,6 +165,12 @@ int ty_is_array(TyKind t);
 /* Set while the type fixpoint iterates; defined in analyze.c. Declared here
    because ty_array_of consults it -- see the TY_UNKNOWN case. */
 extern int g_infer_optimistic;
+/* Set while infer_write_types is re-deriving local types. That pass resets
+   every non-param local to UNKNOWN at the top of each round and re-derives in
+   node order, so a read reached BEFORE its own write answers UNKNOWN -- and
+   ty_unify drops UNKNOWN. The previous round's answer is stashed in gc_root;
+   the local-read rule falls back to it while this is set. */
+extern int g_infer_write_round;
 /* The highest round the inference fixpoint reached. 128 means it hit the cap
    and stopped because the cap said so, not because it converged -- which costs
    compile time and, where the cap lands mid-oscillation, can decide which of

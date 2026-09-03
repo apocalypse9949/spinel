@@ -22,6 +22,7 @@ int g_final_bind_pass = 0;
    boxes. Cleared once the fixpoint converges and iteration continues, so a
    slot whose evidence really never arrives still takes the pessimistic type. */
 int g_infer_optimistic = 0;
+int g_infer_write_round = 0;
 int g_fixpoint_rounds = 0;
 
 /* Defined in codegen.c (linked into the same binary). Used to specialize a

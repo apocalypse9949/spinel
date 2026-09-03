@@ -1425,6 +1425,7 @@ static int widen_aliased_array_ivars(Compiler *c, int node, int cls_id) {
 int infer_write_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
+  g_infer_write_round = 1;
 
   /* Recompute non-param local types FRESH each iteration: reset to UNKNOWN
      (saving the old value), then unify all write-site RHS types. This lets
@@ -2900,6 +2901,7 @@ int infer_write_types(Compiler *c) {
     }
   lw_index_free(&lw_ix);
   lw_index_free(&ivw_ix);
+  g_infer_write_round = 0;
   return changed;
 }
 

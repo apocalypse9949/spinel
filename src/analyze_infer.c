@@ -6032,7 +6032,26 @@ TyKind infer_uncached(Compiler *c, int id) {
     /* an UNMARKED read of a (phase-3-promoted) mutable string demotes to the
        plain string type: ordinary consumers see the copy-read value exactly
        as before promotion (#3227) */
-    if (lv) return lv->type == TY_STRBUF ? TY_STRING : lv->type;
+    if (lv) {
+      TyKind lt = lv->type == TY_STRBUF ? TY_STRING : lv->type;
+      /* Reset-and-re-derive leaves a local UNKNOWN until its own write is
+         reached, so a read that precedes it in node order answered UNKNOWN and
+         the enclosing unify dropped the arm: `v = if c then 9 else (t = s.upcase; t) end`
+         typed v Integer, and the String was converted into an int slot. The
+         previous round's answer is the honest one to carry here; hoisting the
+         same write out of the arm already gave the right type, which is what
+         made the defect depend on node order rather than on the program. */
+      /* Only a CONCRETE carry. A stale poly would widen where the old
+         behaviour let the other arm's concrete type stand, and that is a
+         direction this must not move in: two optcarrot float locals went from
+         sp_float to sp_RbVal on it. UNKNOWN is what those sites answered
+         before, so declining leaves them exactly as they were. */
+      if (lt == TY_UNKNOWN && g_infer_write_round && !lv->is_param &&
+          !lv->is_block_param && (TyKind)lv->gc_root != TY_UNKNOWN &&
+          (TyKind)lv->gc_root != TY_POLY)
+        return (TyKind)lv->gc_root;
+      return lt;
+    }
     return TY_UNKNOWN;
   }
   if (nk == NK_GlobalVariableReadNode) {
