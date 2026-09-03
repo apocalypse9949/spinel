@@ -9359,6 +9359,28 @@ sp_IntArray *sp_file_binread_bytes(const char *path);
 struct sp_Proc;
 static struct sp_Proc *sp_at_exit_hooks[SP_AT_EXIT_MAX];
 static sp_int sp_at_exit_count = 0;
+/* Threaded build: the table is shared by every worker, and on the exit, abort
+   and uncaught-raise paths the drain runs on main while the helper workers are
+   still executing green threads (CRuby keeps them alive across the hooks too),
+   so a thread registering a hook at that moment pushes while main pops. One
+   mutex around the push and the pop; the hook itself is called outside it,
+   since it may register another. No-op in the single-threaded build, the way
+   SP_HEAP_LOCK is, so that build compiles the code it did. */
+#ifdef SP_THREADS
+static pthread_mutex_t sp_at_exit_lock = PTHREAD_MUTEX_INITIALIZER;
+#define SP_AT_EXIT_LOCK()   pthread_mutex_lock(&sp_at_exit_lock)
+#define SP_AT_EXIT_UNLOCK() pthread_mutex_unlock(&sp_at_exit_lock)
+#else
+#define SP_AT_EXIT_LOCK()   ((void)0)
+#define SP_AT_EXIT_UNLOCK() ((void)0)
+#endif
+/* `at_exit { }`: the registering expression evaluates to the proc. */
+static inline struct sp_Proc *sp_at_exit_push(struct sp_Proc *p) {
+  SP_AT_EXIT_LOCK();
+  sp_at_exit_hooks[sp_at_exit_count++] = p;
+  SP_AT_EXIT_UNLOCK();
+  return p;
+}
 static void sp_mark_at_exit_hooks(void) {
   for (sp_int i = 0; i < sp_at_exit_count; i++)
     if (sp_at_exit_hooks[i]) sp_gc_mark(sp_at_exit_hooks[i]);
@@ -10292,8 +10314,12 @@ static int sp_at_exit_run(int status) {
   /* setjmp: `st` is written on the landing path and read after it. */
   volatile int st = status;
   sp_int args[16] = {0};   /* sp_proc_call's fixed slot convention */
-  while (sp_at_exit_count > 0) {
-    sp_Proc *h = sp_at_exit_hooks[--sp_at_exit_count];
+  for (;;) {
+    SP_AT_EXIT_LOCK();
+    sp_int n = sp_at_exit_count;
+    sp_Proc *h = n > 0 ? sp_at_exit_hooks[--sp_at_exit_count] : NULL;
+    SP_AT_EXIT_UNLOCK();
+    if (n <= 0) break;
     SP_GC_ROOT(h);
     if (!h) continue;
     /* Every hook starts from an empty proc-return / break / catch state, the
@@ -10307,6 +10333,10 @@ static int sp_at_exit_run(int status) {
        as the block's own return and never reaches these stacks.) Only the
        exception stack is left alone: this loop's own frame is on it. */
     sp_proc_ret_head = NULL; sp_brk_top = 0; sp_catch_top = 0;
+    /* The check every other arm of this stack has. It cannot fire here --
+       every path into the drain arrives with the exception stack empty -- but
+       an arm without it is the one a reader has to reason about. */
+    sp_exc_check_depth();
     sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp;
     sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;
     if (setjmp(sp_exc_stack[sp_exc_top - 1]) == 0) {
