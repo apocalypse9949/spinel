@@ -28832,11 +28832,16 @@ else {
            emitted it (#3383). */
         if (has_retval && g_in_proc_body && g_result_var && g_result_poly)
           buf_printf(b, "if (_retf%d) { %s = _retv%d; return 0; } ", eid, g_result_var, eid);
+        /* a fiber body is `static void`: see g_c_ret_void */
+        else if (has_retval && g_c_ret_void) buf_printf(b, "if (_retf%d) return; ", eid);
         else if (has_retval) buf_printf(b, "if (_retf%d) return _retv%d; ", eid, eid);
         else if (g_in_proc_body && g_result_var && g_result_poly)
           buf_printf(b, "if (_retf%d) { %s = sp_box_nil(); return 0; } ", eid, g_result_var);
+        else if (g_c_ret_void) buf_printf(b, "if (_retf%d) return; ", eid);
         else if (g_ret_type == TY_POLY) buf_printf(b, "if (_retf%d) return sp_box_nil(); ", eid);
         else if (g_ret_type == TY_UNKNOWN) buf_printf(b, "if (_retf%d) return 0; ", eid);
+        /* a proc body returns sp_int: see the sibling in codegen_iter.c */
+        else if (g_in_proc_body) buf_printf(b, "if (_retf%d) return 0; ", eid);
         else buf_printf(b, "if (_retf%d) return; ", eid);
         buf_printf(b, "if (_excf%d) sp_raise_cls(_exccls%d, _excmsg%d); ", eid, eid, eid);
       }

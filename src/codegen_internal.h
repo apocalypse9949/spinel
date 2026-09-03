@@ -239,6 +239,8 @@ extern int g_block_brk_exc_base;
 /* Return type of the method currently being emitted, so a tail/return value
    can be boxed when the method returns poly but the value is concrete. */
 extern TyKind g_ret_type;
+extern int g_c_ret_void;   /* the C function returns void (a fiber body) */
+extern int g_c_ret_void;   /* the C function returns void (a fiber body) */
 extern const char *g_fn_pr_label;   /* real function's return funnel (see codegen_util.c) */
 extern const char *g_fn_pr_var;
 extern TyKind g_fn_ret_type;

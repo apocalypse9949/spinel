@@ -335,6 +335,13 @@ int g_method_pr_exc_depth = 0;
 const char *g_hoist_len_var = NULL;
 const char *g_hoist_len_recv = NULL;
 TyKind g_ret_type = TY_UNKNOWN;
+/* The C function being emitted returns void, whatever g_ret_type says the
+   Ruby body's value type is. A fiber/thread body is that case: it is
+   `static void _fiber_body_N(sp_Fiber *)` and publishes its value through
+   _fb->yielded_value, while g_ret_type is TY_POLY so the body's own
+   expressions type. `return <value>` emitted into it is a C constraint
+   violation, and GCC 14 rejects it. */
+int g_c_ret_void = 0;
 /* Mirror of the REAL enclosing function's return funnel: yield-method inlining
    overrides g_method_pr_label/-_var/g_ret_type with a per-inline funnel, and a
    spliced block body (which lexically belongs to the real function, so its
