@@ -9562,6 +9562,28 @@ else {
   if (sp_streq(ty, "UntilNode"))  { const char *sv = g_brk_ser_var; g_brk_ser_var = NULL; emit_while(c, id, b, indent, 1); g_brk_ser_var = sv; return; }
   if (sp_streq(ty, "ForNode"))    { const char *sv = g_brk_ser_var; g_brk_ser_var = NULL; emit_for(c, id, b, indent); g_brk_ser_var = sv; return; }
   if (sp_streq(ty, "BreakNode")) {
+    /* A break in a fiber/thread body with no block wrapper and no C loop in
+       scope has no target: CRuby's LocalJumpError. sp_brk_throw's not-found
+       tail is that raise, and it stages the value as #exit_value. */
+    /* ...but a lambda or proc body nested in the fiber is its own function
+       with its own break rule (a lambda's break returns from the lambda), so
+       leave those to the arms below: g_proc_body_kind marks them. */
+    if (!g_brk_ser_var && g_c_ret_void && g_c_loop_depth == 0 && g_proc_body_kind == 0) {
+      int bargs2 = nt_ref(nt, id, "arguments");
+      int bn2 = 0; const int *bv2 = bargs2 >= 0 ? nt_arr(nt, bargs2, "arguments", &bn2) : NULL;
+      emit_indent(b, indent);
+      buf_puts(b, "sp_brk_throw(-1, ");
+      if (bn2 == 0) buf_puts(b, "sp_box_nil()");
+      else if (bn2 == 1) emit_boxed(c, bv2[0], b);
+      else {
+        int t2 = ++g_tmp;
+        buf_printf(b, "({ sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d); ", t2, t2);
+        for (int k = 0; k < bn2; k++) { buf_printf(b, "sp_PolyArray_push(_t%d, ", t2); emit_boxed(c, bv2[k], b); buf_puts(b, "); "); }
+        buf_printf(b, "sp_box_poly_array(_t%d); })", t2);
+      }
+      buf_puts(b, ");\n");
+      return;
+    }
     if (g_brk_ser_var) {
       /* break from a block: deliver the value to the enclosing wrapper. With
          no intervening ensure frames this is a same-function `goto` -- no

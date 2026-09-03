@@ -3890,6 +3890,15 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
   const char *sv_yld = g_yielder_name;
   TyKind sv_rt = g_ret_type; int sv_rp = g_result_poly;
   int sv_cv = g_c_ret_void; g_c_ret_void = 1;   /* the C function is `static void` */
+  /* A `return` written in a fiber/thread body cannot reach its home method:
+     the body runs on its own stack, and CRuby answers the same shape with
+     LocalJumpError whether the home is still on the stack or not, at the top
+     level as well. Route it through sp_proc_return with an id no home can
+     carry (ids come from sp_proc_home_seq, which starts at 0), so it takes
+     that function's not-found tail: LocalJumpError, with the returned value
+     staged as #exit_value, exactly as a proc outliving its home does. */
+  const char *sv_prh_fb = g_proc_return_home; int sv_ptr_fb = g_proc_toplevel_return;
+  g_proc_return_home = "-1"; g_proc_toplevel_return = 0;
   g_pre = NULL; g_indent = 1; g_nren = 0; g_block_id = blk; g_block_nren = 0;
   g_block_param_name = bp0; g_self = sv_self;
   g_yielder_name = as_gen ? bp0 : NULL;   /* `y << v` -> Fiber.yield in the body */
@@ -3902,6 +3911,15 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
   const char *sv_fn_prl2 = g_fn_pr_label, *sv_fn_prv2 = g_fn_pr_var; TyKind sv_fn_rt2 = g_fn_ret_type;
   g_fn_pr_label = NULL; g_fn_pr_var = NULL; g_fn_ret_type = TY_POLY;
   const char *sv_fbser = g_brk_ser_var; g_brk_ser_var = NULL;   /* fresh function context */
+  /* A `break` written directly in a fiber/thread body -- not inside a block
+     or a C loop within it -- has nothing to deliver to and cannot reach one
+     across the body's own stack. It fell through to a bare C `break;` with no
+     loop around it, which did not compile. g_c_ret_void marks the body and
+     g_c_loop_depth tells the BreakNode emitter whether a real loop is in
+     scope; where neither holds it throws a serial no live scope carries
+     (sp_brk_seq starts at 1), taking sp_brk_throw's not-found tail: CRuby's
+     LocalJumpError "break from proc-closure", value staged as #exit_value. */
+  int sv_fbcld = g_c_loop_depth; g_c_loop_depth = 0;
   int sv_fbskip = g_brk_skip_id; g_brk_skip_id = -1;
   int sv_fbexcd = g_exc_frame_depth, sv_fbprexcd = g_method_pr_exc_depth;
   int sv_fbrsd = g_rescue_save_depth;
@@ -4079,10 +4097,12 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
   /* Restore emission state */
   g_pre = sv_pre; g_indent = sv_indent; g_nren = sv_nren; g_block_id = sv_block; g_block_nren = sv_bnren;
   g_block_param_name = sv_bpn; g_self = sv_self; g_ret_type = sv_rt; g_c_ret_void = sv_cv;
+  g_proc_return_home = sv_prh_fb; g_proc_toplevel_return = sv_ptr_fb;
   g_self_deref = sv_fbderef;
   g_result_poly = sv_rp; g_result_var = sv_rv; g_yielder_name = sv_yld;
   g_fn_pr_label = sv_fn_prl2; g_fn_pr_var = sv_fn_prv2; g_fn_ret_type = sv_fn_rt2;
   g_brk_ser_var = sv_fbser; g_brk_skip_id = sv_fbskip;
+  g_c_loop_depth = sv_fbcld;
   g_exc_frame_depth = sv_fbexcd; g_method_pr_exc_depth = sv_fbprexcd;
   g_rescue_save_depth = sv_fbrsd;
 
