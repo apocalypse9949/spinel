@@ -18964,10 +18964,11 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
 
   /* at_exit { ... } -> register the block as a Proc; sp_at_exit_run runs
      the hooks in reverse order, from main()'s tail and from every other path
-     that ends the program. The registration expression evaluates to the proc. */
+     that ends the program. The registration expression evaluates to the proc;
+     sp_at_exit_push locks the table in the threaded build. */
   if (recv < 0 && sp_streq(name, "at_exit") && nt_ref(nt, id, "block") >= 0 && !bare_call_class_owned(c, id)) {
     g_needs_at_exit = 1;
-    buf_puts(b, "(sp_at_exit_hooks[sp_at_exit_count++] = ");
+    buf_puts(b, "sp_at_exit_push(");
     emit_proc_literal(c, id, b);
     buf_puts(b, ")");
     return;
