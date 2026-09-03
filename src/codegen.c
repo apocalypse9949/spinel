@@ -10141,6 +10141,7 @@ char *codegen_program(const NodeTable *nt) {
        never reaches into runtime statics (M0 finding 1). */
     buf_printf(body,
       "int %s_try(void (*fn)(void *), void *ctx, const char **cls, const char **msg) {\n"
+      "  sp_exc_check_depth();\n"
       "  sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp;\n"
       "  sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;\n"
       "  if (setjmp(sp_exc_stack[sp_exc_top - 1]) == 0) { fn(ctx); sp_exc_top--; return 0; }\n"

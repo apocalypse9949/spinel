@@ -5326,6 +5326,8 @@ int emit_enum_find_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "int _t%d = sp_gc_nroots; (void)_t%d;\n", tg, tg);
   emit_indent(g_pre, g_indent);
+  buf_puts(g_pre, "sp_exc_check_depth();\n");
+  emit_indent(g_pre, g_indent);
   buf_puts(g_pre, "sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;\n");
   emit_indent(g_pre, g_indent);
   buf_puts(g_pre, "if (setjmp(sp_exc_stack[sp_exc_top-1]) == 0) {\n");

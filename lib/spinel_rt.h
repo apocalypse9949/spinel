@@ -8079,6 +8079,28 @@ static void sp_rescue_push(void *e) {
   }
   sp_exc_handling[sp_rescue_sp++] = e;
 }
+/* Each of the fixed-depth handler stacks below fails the same way when a
+   program nests deeper than its array holds: CRuby's SystemStackError words,
+   on stderr, and out. One copy of them, called from each stack's check. Not a
+   Ruby SystemStackError -- catching one needs a handler slot, which is exactly
+   what has run out. (sp_rescue_push above keeps its own older wording, which
+   names the nesting that overflowed.) */
+SP_NORETURN SP_COLD static void sp_stack_too_deep(void) {
+  fputs("stack level too deep (SystemStackError)\n", stderr);
+  exit(1);
+}
+/* Guard an exception-frame arm. Every arm stores into sp_exc_rootmark
+   [sp_exc_top] (or sp_exc_msg[sp_exc_top]) before it bumps sp_exc_top, so what
+   the check must precede is that first indexed store, not the ++; it opens the
+   frame-arming sequence at every arm the codegen emits. The depth is not a
+   lexical property: a method whose body is a begin/rescue keeps its frame armed
+   across the calls that body makes, so ordinary recursion 65 deep reaches the
+   end of the array just as 65 nested begins do. Inside a fiber body, and inside
+   a thread's, one slot is already spent on the frame the runtime arms around it
+   (sp_exc_arm below), so 63 of the body's own is the last that fits. */
+static inline void sp_exc_check_depth(void) {
+  if (SP_UNLIKELY(sp_exc_top >= SP_EXC_STACK_MAX)) sp_stack_too_deep();
+}
 /* ---- Native backtrace formatting (spinel --debug) ---------------------- */
 /* True for sp_<name> symbols that are runtime helpers, not user Ruby methods.
    A denylist of the lowercase runtime prefixes; user methods are sp_<rubyname>
@@ -8140,6 +8162,10 @@ static SP_TLS struct sp_proc_home *sp_unwind_home = NULL;  /* PROCRET target (TH
    result is stored as a void* in sp_exc_obj[]. */
 struct sp_Exception_s;
 static void *sp_exc_recover_named(const char *cls, const char *msg);
+/* forward: drop the handler-stack entries a raise unwinds past. Defined far
+   below, beside the three stacks it pops -- all of them declared after this
+   function, which is why the declaration has to come up here. */
+static void sp_handler_stacks_unwind(void);
 #ifdef SPINEL_EXT_HOST
 SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg);
 #else
@@ -8199,7 +8225,7 @@ SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg) {
      here to the landing, and copying it a second time would only reintroduce
      an allocation between the last read of the caller's pointer and this
      store. */
-  if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_exc_obj[sp_exc_top-1] = sp_pending_exc_obj; sp_pending_exc_obj = NULL; sp_pending_cause = sp_explicit_cause_set ? sp_explicit_cause : (sp_cur_handled() ? sp_cur_handled() : sp_inflight_cause); sp_inflight_cause = NULL; sp_explicit_cause = NULL; sp_explicit_cause_set = 0; sp_last_exc_cls = cls; longjmp(sp_exc_stack[sp_exc_top-1], 1); }
+  if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_exc_obj[sp_exc_top-1] = sp_pending_exc_obj; sp_pending_exc_obj = NULL; sp_pending_cause = sp_explicit_cause_set ? sp_explicit_cause : (sp_cur_handled() ? sp_cur_handled() : sp_inflight_cause); sp_inflight_cause = NULL; sp_explicit_cause = NULL; sp_explicit_cause_set = 0; sp_last_exc_cls = cls; sp_handler_stacks_unwind(); longjmp(sp_exc_stack[sp_exc_top-1], 1); }
   /* Uncaught SystemExit terminates silently with its status (Kernel#exit). */
   if (strcmp(cls, "SystemExit") == 0) exit(sp_exc_exit_status(sp_pending_exc_obj));
   /* Uncaught: CRuby's tail format "<message> (<ClassName>)", prefixed by the
@@ -8611,6 +8637,11 @@ static SP_TLS sp_RbVal sp_catch_val[SP_CATCH_STACK_MAX];
 static SP_TLS int sp_catch_exc_top[SP_CATCH_STACK_MAX];  /* exception depth at each catch's entry */
 static SP_TLS int sp_catch_rootmark[SP_CATCH_STACK_MAX]; /* GC-root watermark at entry (see sp_exc_rootmark) */
 static SP_TLS volatile int sp_catch_top = 0;
+/* Guard a catch push, like sp_exc_check_depth: the arm's first store is
+   sp_catch_tag[sp_catch_top], so this runs in front of it. */
+static inline void sp_catch_check_depth(void) {
+  if (SP_UNLIKELY(sp_catch_top >= SP_CATCH_STACK_MAX)) sp_stack_too_deep();
+}
 /* shared counter (not SP_TLS) so `catch { |tag| }` autotags are globally
    unique; see sp_brk_seq for the same shape */
 static sp_int sp_catch_seq = 0;
@@ -8648,7 +8679,7 @@ static void sp_throw(const char *tag, int kind, sp_RbVal val) {
    (SP_UNWIND_BREAK) so `ensure` bodies run, exactly like sp_throw and
    sp_proc_return above. The value channel is poly so any break value carries
    faithfully. Per-worker (SP_TLS) and fiber-context-saved like the catch
-   arrays; the push is unchecked like sp_exc_arm / the catch push.
+   arrays; the push is bounded like sp_exc_arm / the catch push.
    The backing storage is heap-allocated on the first push (like
    sp_gc_mark_stack), NOT inline TLS arrays: ~14KB of TLS (a jmp_buf is
    ~200 bytes) shifts every hot TLS variable's layout and cost optcarrot
@@ -8666,11 +8697,8 @@ static sp_int sp_brk_seq = 1;
 static sp_int sp_brk_push(void) {
   /* Fixed-depth stack like sp_exc / sp_catch: guard the push so pathological
      nesting (e.g. deep recursion through .each/.map) fails loudly instead of
-     writing past the array. CRuby's SystemStackError message. */
-  if (sp_brk_top >= SP_BRK_STACK_MAX) {
-    fputs("stack level too deep (SystemStackError)\n", stderr);
-    exit(1);
-  }
+     writing past the array. */
+  if (SP_UNLIKELY(sp_brk_top >= SP_BRK_STACK_MAX)) sp_stack_too_deep();
   if (!sp_brk_stack) {
     sp_brk_stack = (jmp_buf *)malloc(sizeof(jmp_buf) * SP_BRK_STACK_MAX);
     sp_brk_val = (sp_RbVal *)malloc(sizeof(sp_RbVal) * SP_BRK_STACK_MAX);
@@ -8746,7 +8774,7 @@ static void sp_mark_brk_vals(void) {
    over (see the unwind machinery above); when there are none it longjmps straight
    home. The `exc_top` field records the exception-handler depth at the method's
    entry so intervening ensures run and so an exception that unwinds the home pops
-   the node (sp_proc_homes_unwind). */
+   the node (sp_handler_stacks_unwind). */
 typedef struct sp_proc_home {
   jmp_buf jb;                 /* the home method's setjmp target (on its C stack) */
   sp_RbVal val;               /* the in-flight return value (nil until delivered) */
@@ -8784,18 +8812,40 @@ static void sp_proc_return(sp_int id, sp_RbVal v) {
   sp_exc_stage_val(v);   /* LocalJumpError#exit_value carries the returned value (#3024) */
   sp_raise_cls("LocalJumpError", "unexpected return");
 }
-/* Pop home nodes whose method an exception has unwound past (recorded exc_top now
-   above the live exception depth), so a later proc-return to a dead home misses
-   and raises LocalJumpError rather than longjmping into a freed C frame. Called
-   wherever a caught exception drops sp_exc_top. A no-op during a proc-return /
-   throw unwind: the target's exc_top is at or below the new depth. */
-static void sp_proc_homes_unwind(void) {
-  while (sp_proc_ret_head && sp_proc_ret_head->exc_top > sp_exc_top)
+/* Drop the catch entries, break scopes and proc-return homes a raise unwinds
+   past. sp_raise_cls calls this just before it longjmps to sp_exc_stack
+   [sp_exc_top-1]; that handler is the frame the exception lands in, and every
+   entry opened INSIDE it dies with the C frames the longjmp skips over.
+
+   Each of the three records the exception depth at its own entry, so "opened
+   inside the landing frame" reads the same on all of them: the landing frame
+   was armed at sp_exc_top-1, so anything entered after it recorded sp_exc_top
+   or more, and anything entered before it recorded less.
+
+   The raise is the one place this can be done once. A landing pops the same
+   entries with `> sp_exc_top` after its own sp_exc_top--, but only six of the
+   ten emitted landings ever did so, and the four that did not -- Kernel#loop
+   in either form, the enumerator fold and the ext-host try -- leaked every
+   entry that unwound through them. Here it also costs the emitted code
+   nothing.
+
+   Not called for a proc return, a throw or a valued break: those longjmp to
+   sp_exc_stack themselves, and each trims its own target stack first
+   (sp_throw sets sp_catch_top, sp_brk_throw sets sp_brk_top, sp_proc_return
+   walks to a live home), so the entries between here and the target are still
+   the ones they mean to deliver to. */
+static void sp_handler_stacks_unwind(void) {
+  /* a dead catch entry is worse than a leak: sp_catch_top is fixed at 64, so a
+     raise out of a catch in a loop walks it off the end -- and a later `throw`
+     that matches one longjmps into a finished frame */
+  while (sp_catch_top > 0 && sp_catch_exc_top[sp_catch_top - 1] >= sp_exc_top)
+    sp_catch_top--;
+  /* a home node whose method the raise unwinds past: a later proc-return to it
+     must miss and raise LocalJumpError, not longjmp into a freed C frame */
+  while (sp_proc_ret_head && sp_proc_ret_head->exc_top >= sp_exc_top)
     sp_proc_ret_head = sp_proc_ret_head->prev;
-  /* pop break scopes the exception unwound past too, so a later proc-break
-     addressing a dead scope misses (LocalJumpError) instead of longjmping
-     into a freed C frame */
-  while (sp_brk_top > 0 && sp_brk_exc_top[sp_brk_top - 1] > sp_exc_top)
+  /* and a break scope, addressed by serial, for the same reason */
+  while (sp_brk_top > 0 && sp_brk_exc_top[sp_brk_top - 1] >= sp_exc_top)
     sp_brk_top--;
 }
 /* GC: mark the current fiber's chain of in-flight return values (suspended fibers
@@ -8974,7 +9024,7 @@ void sp_exc_ctx_mark(void *p) {            /* GC: mark a suspended fiber's carri
 #ifdef SPINEL_EXT_HOST
 void sp_exc_arm(jmp_buf b);
 #else
-void sp_exc_arm(jmp_buf b)     { memcpy(sp_exc_stack[sp_exc_top], b, sizeof(jmp_buf)); sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++; }
+void sp_exc_arm(jmp_buf b)     { sp_exc_check_depth(); memcpy(sp_exc_stack[sp_exc_top], b, sizeof(jmp_buf)); sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++; }
 #endif
 #ifdef SPINEL_EXT_HOST
 void sp_exc_disarm(void);
